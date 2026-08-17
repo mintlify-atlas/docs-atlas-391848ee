@@ -1,0 +1,504 @@
+---
+title: "Manage AI Agent Skills as OCI Artifacts with the CLI"
+sidebarTitle: "Skills"
+description: "Use flux-operator skills to install, update, publish, and uninstall AI agent skills distributed as cryptographically signed OCI artifacts with Sigstore verification."
+---
+
+The `flux-operator skills` commands implement a package manager for AI agent skills — reusable instruction sets that teach agents like Claude Code, GitHub Copilot, and Kiro how to perform specific tasks. Skills are packaged and distributed as OCI artifacts, cryptographically signed with Sigstore keyless signing, and installed to `.agents/skills/` in your project directory. This gives teams a trusted, auditable, and reproducible way to share skills across projects and environments.
+
+Unlike Git-based skill distribution (e.g. `npx skills`) where consumers implicitly trust the source repository with no built-in integrity verification, the OCI approach provides content-addressable digests, Sigstore keyless signing, and tampering detection on every install and update.
+
+## Skill Format
+
+Each skill lives in its own directory containing a `SKILL.md` file. The `SKILL.md` file has a YAML frontmatter header that declares the skill's metadata, followed by Markdown instructions for the agent. Skills must conform to the [Agent Skills Standard](https://agentskills.io/).
+
+```text
+my-skill/
+├── SKILL.md          # Required: instructions + metadata
+├── scripts/          # Optional: executable code
+├── references/       # Optional: documentation
+└── assets/           # Optional: templates and schemas
+```
+
+**`SKILL.md` format**
+
+```text
+---
+name: my-skill
+description: What the skill does and when to use it
+license: Apache-2.0
+allowed-tools: Read Grep Glob Bash(scripts/my-script.sh:*)
+compatibility: Scripts require awk, git, flux-operator CLI
+---
+
+# My Skill
+
+Instructions for the AI agent on how to use this skill.
+```
+
+<Note>
+  Skill names must be lowercase alphanumeric with hyphens, must not start or end with a hyphen, must not contain consecutive hyphens, and may not exceed 64 characters.
+</Note>
+
+---
+
+## install
+
+Pulls a skill artifact from an OCI registry, verifies its Sigstore signature, extracts skills to `.agents/skills/`, and updates `catalog.yaml` and `catalog-lock.yaml`.
+
+```shell
+flux-operator skills install <repository>
+```
+
+**Flags**
+
+| Flag | Description | Default |
+|---|---|---|
+| `--tag` | OCI artifact tag | `latest` |
+| `--skill` | Skill name(s) to install (repeatable); installs all if omitted | All skills |
+| `--agent` | Agent ID(s) for which to create symlinks (repeatable) | `universal` |
+| `--verify` | Verify the cosign signature of the artifact | `true` |
+| `--verify-oidc-issuer` | OIDC issuer for signature verification | Auto-derived for `ghcr.io` |
+| `--verify-oidc-subject-regex` | OIDC subject regexp for verification | Auto-derived for `ghcr.io` |
+| `--verify-trusted-root` | Path to a `trusted_root.json` file for offline verification | — |
+
+**Examples**
+
+<Tabs>
+  <Tab title="Basic Install">
+    Install all skills from a ghcr.io repository. OIDC issuer and subject regex are derived automatically:
+
+    ```shell
+    flux-operator skills install ghcr.io/fluxcd/agent-skills
+    ```
+  </Tab>
+  <Tab title="Specific Version">
+    Install a pinned version:
+
+    ```shell
+    flux-operator skills install ghcr.io/my-org/agent-skills --tag v1.0.0
+    ```
+  </Tab>
+  <Tab title="Selective Install">
+    Install only specific skills from the artifact:
+
+    ```shell
+    flux-operator skills install ghcr.io/fluxcd/agent-skills \
+      --skill gitops-cluster-debug \
+      --skill gitops-repo-audit
+    ```
+  </Tab>
+  <Tab title="Agent Symlinks">
+    Install and create symlinks for specific agents:
+
+    ```shell
+    flux-operator skills install ghcr.io/my-org/agent-skills \
+      --agent claude-code \
+      --agent kiro
+    ```
+  </Tab>
+  <Tab title="Non-GHCR Registry">
+    Provide OIDC verification parameters explicitly for non-ghcr.io registries:
+
+    ```shell
+    flux-operator skills install docker.io/my-org/skills \
+      --verify-oidc-issuer=https://token.actions.githubusercontent.com \
+      --verify-oidc-subject-regex='^https://github\.com/my-org/.*$'
+    ```
+  </Tab>
+  <Tab title="Air-Gapped">
+    Use a local Sigstore trusted root for offline verification:
+
+    ```shell
+    flux-operator skills install ghcr.io/my-org/agent-skills \
+      --verify-trusted-root /path/to/trusted_root.json
+    ```
+  </Tab>
+  <Tab title="Skip Verification">
+    Skip signature verification (not recommended for production):
+
+    ```shell
+    flux-operator skills install ghcr.io/my-org/agent-skills --verify=false
+    ```
+  </Tab>
+</Tabs>
+
+### Installation Steps
+
+The `install` command executes the following steps in order:
+
+<Steps>
+  <Step title="Resolve remote digest">
+    Resolves the remote digest for the specified tag from the OCI registry.
+  </Step>
+  <Step title="Verify cosign signature">
+    Verifies the Sigstore cosign signature using the resolved digest reference.
+  </Step>
+  <Step title="Pull artifact content">
+    Pulls the artifact content by digest (not by tag, ensuring integrity).
+  </Step>
+  <Step title="Discover skills">
+    Discovers all skills in the artifact — each directory must contain a valid `SKILL.md`.
+  </Step>
+  <Step title="Check for name conflicts">
+    Checks for name conflicts with skills installed from other sources; rejects installations that would create duplicates.
+  </Step>
+  <Step title="Sync skill directories">
+    Syncs skill directories to `.agents/skills/`.
+  </Step>
+  <Step title="Write catalog files">
+    Writes `catalog.yaml` (spec) and `catalog-lock.yaml` (lock with digests and checksums).
+  </Step>
+  <Step title="Create agent symlinks">
+    Creates agent-specific symlinks if `--agent` is set (e.g. `.claude/skills/my-skill → ../../.agents/skills/my-skill`).
+  </Step>
+</Steps>
+
+### Agent Symlinks
+
+Skills are always stored canonically in `.agents/skills/`. Many AI agents look for skills in agent-specific directories. The `--agent` flag creates relative symlinks from those directories to the canonical location:
+
+```shell
+flux-operator skills install ghcr.io/my-org/agent-skills \
+  --agent claude-code \
+  --agent kiro
+```
+
+This creates:
+
+```text
+.claude/skills/my-skill  ->  ../../.agents/skills/my-skill
+.kiro/skills/my-skill    ->  ../../.agents/skills/my-skill
+```
+
+Supported agent IDs include `claude-code`, `kiro`, `github-copilot`, and `universal` (the default — installs to `.agents/skills/` without creating additional symlinks). The agent configuration is stored per-source in `catalog.yaml` so each OCI source can target different agents. Re-installing with different agents automatically cleans up old symlinks.
+
+---
+
+## list
+
+Lists all installed skills with their source repository, tag, digest, and last update timestamp.
+
+```shell
+flux-operator skills list
+```
+
+**Sample output**
+
+| Name | Repository | Tag | Digest | Last Update |
+|---|---|---|---|---|
+| gitops-cluster-debug | ghcr.io/fluxcd/agent-skills | latest | sha256:abc1234... | 2026-03-10T12:00:00Z |
+| gitops-repo-audit | ghcr.io/fluxcd/agent-skills | latest | sha256:abc1234... | 2026-03-10T12:00:00Z |
+
+---
+
+## update
+
+Checks for new versions of all installed skills by comparing the remote digest against the local lock file. Downloads and applies updates when the remote digest differs. Also detects and restores locally tampered or deleted skill files via per-skill checksum comparison.
+
+```shell
+flux-operator skills update
+```
+
+**Flags**
+
+| Flag | Description | Default |
+|---|---|---|
+| `--dry-run` | Check for updates without installing them; exits with code `1` if updates are available | `false` |
+| `--verify-trusted-root` | Path to a `trusted_root.json` for offline signature verification | — |
+
+**Examples**
+
+```shell
+# Update all installed skills to latest remote versions
+flux-operator skills update
+
+# Check for updates in CI without applying them
+flux-operator skills update --dry-run
+
+# Update with offline signature verification
+flux-operator skills update --verify-trusted-root /path/to/trusted_root.json
+```
+
+<Tip>
+  Use `flux-operator skills update --dry-run` as a CI check to detect when upstream skills have changed. The non-zero exit code on available updates makes it easy to gate pull requests or trigger automated update PRs.
+</Tip>
+
+---
+
+## uninstall
+
+Removes skills installed from a specific OCI repository, or all skills from all repositories. Cleans up skill directories, catalog entries, lock entries, and all associated agent symlinks. Empty agent directories are removed automatically.
+
+```shell
+flux-operator skills uninstall <repository>
+```
+
+**Flags**
+
+| Flag | Description | Default |
+|---|---|---|
+| `--all` | Uninstall all skills from all repositories | `false` |
+
+**Examples**
+
+```shell
+# Remove skills from a specific repository
+flux-operator skills uninstall ghcr.io/fluxcd/agent-skills
+
+# Remove all skills from all repositories
+flux-operator skills uninstall --all
+```
+
+---
+
+## publish
+
+Packages a local skills directory and pushes it to an OCI registry as a content-addressable artifact. Optionally signs the artifact using Sigstore cosign keyless signing (Fulcio certificate + Rekor transparency log).
+
+```shell
+flux-operator skills publish <repository>
+```
+
+**Flags**
+
+| Flag | Description | Default |
+|---|---|---|
+| `--path` | Path to the skills directory | `skills` |
+| `--tag` | OCI artifact tag (repeatable for multiple tags) | `latest` |
+| `--diff-tag` | Only push if the contents differ from this existing tag | — |
+| `-a, --annotation` | OCI manifest annotation in `key=value` format (repeatable) | — |
+| `--sign` | Sign the artifact with cosign keyless | `false` |
+| `-o, --output` | Output format (`json`) | — |
+
+**Examples**
+
+<Tabs>
+  <Tab title="Basic Publish">
+    ```shell
+    flux-operator skills publish ghcr.io/my-org/agent-skills \
+      --tag v1.0.0 \
+      --tag latest
+    ```
+  </Tab>
+  <Tab title="With Signing">
+    ```shell
+    flux-operator skills publish ghcr.io/my-org/agent-skills \
+      --tag v1.0.0 \
+      --tag latest \
+      --sign
+    ```
+  </Tab>
+  <Tab title="With Annotations">
+    ```shell
+    flux-operator skills publish ghcr.io/my-org/agent-skills \
+      --tag v1.0.0,latest \
+      -a 'org.opencontainers.image.description=AI Agent Skills' \
+      -a 'org.opencontainers.image.licenses=Apache-2.0' \
+      --sign
+    ```
+  </Tab>
+  <Tab title="Diff-Only Push">
+    Only publish if content has changed since the last `latest` push:
+
+    ```shell
+    flux-operator skills publish ghcr.io/my-org/agent-skills \
+      --tag main-abc1234 \
+      --tag main \
+      --diff-tag main \
+      --sign
+    ```
+  </Tab>
+  <Tab title="Custom Path">
+    ```shell
+    flux-operator skills publish ghcr.io/my-org/agent-skills \
+      --path ./my-skills-dir \
+      --tag v2.0.0 \
+      --sign
+    ```
+  </Tab>
+</Tabs>
+
+**OCI Artifact Structure**
+
+Skills are packaged with normalized archive headers (zero uid/gid, zero timestamps), ensuring the same source content always produces the same archive bytes for reliable content-based diffing:
+
+| Component | Media Type |
+|---|---|
+| Config | `application/vnd.cncf.flux.config.v1+json` |
+| Content layer | `application/vnd.cncf.flux.content.v1.tar+gzip` |
+
+**Auto-populated OCI annotations from Git metadata**
+
+| Annotation | Source |
+|---|---|
+| `org.opencontainers.image.created` | Last commit timestamp |
+| `org.opencontainers.image.source` | Remote origin URL (normalized to HTTPS) |
+| `org.opencontainers.image.revision` | `<ref>@sha1:<commit>` |
+| `org.opencontainers.image.version` | Exact semver tag on HEAD (if any) |
+
+User-provided `-a` annotations take precedence over auto-populated values.
+
+**GitHub Actions workflow**
+
+```yaml
+name: publish
+on:
+  push:
+    branches: [main]
+    tags: ['*']
+
+jobs:
+  skills-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write  # for pushing to GHCR
+      id-token: write  # for signing with cosign
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Install flux-operator CLI
+        uses: controlplaneio-fluxcd/flux-operator@main
+      - name: Install cosign CLI
+        uses: sigstore/cosign-installer@v4
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Prepare tags
+        id: prep
+        run: |
+          TAG=${{ github.ref_name }}
+          VERSION="${{ github.ref_name }}-${GITHUB_SHA::8}"
+          if [[ $GITHUB_REF == refs/tags/* ]]; then
+            TAG=latest
+            VERSION="${{ github.ref_name }}"
+          fi
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+      - name: Publish skills
+        run: |
+          flux-operator skills publish ghcr.io/${{ github.repository }} \
+            --path ./skills \
+            --tag ${{ steps.prep.outputs.version }} \
+            --tag ${{ steps.prep.outputs.tag }} \
+            --diff-tag ${{ steps.prep.outputs.tag }} \
+            -a 'org.opencontainers.image.description=AI Agent Skills for Flux CD' \
+            -a 'org.opencontainers.image.licenses=Apache-2.0' \
+            --sign
+```
+
+---
+
+## Catalog Files
+
+The skills catalog is tracked in two files inside `.agents/skills/`:
+
+### catalog.yaml
+
+The user-editable spec file containing OCI sources with their verification settings. This is the authoritative source of truth — commit it to version control.
+
+```yaml
+apiVersion: agent.fluxcd.controlplane.io/v1
+kind: Catalog
+spec:
+  sources:
+  - repository: ghcr.io/fluxcd/agent-skills
+    tag: latest
+    targetAgents:
+    - claude-code
+    - kiro
+    verify:
+      provider: cosign
+      matchOIDCIdentity:
+      - issuer: https://token.actions.githubusercontent.com
+        subject: ^https://github\.com/fluxcd/.*$
+```
+
+### catalog-lock.yaml
+
+The auto-generated lock file containing the full inventory with resolved digests, per-skill checksums, artifact annotations, and timestamps. Similar to `go.sum` or `package-lock.json` — commit it to version control for reproducible installs and drift detection.
+
+```yaml
+# This manifest was generated by flux-operator. DO NOT EDIT.
+apiVersion: agent.fluxcd.controlplane.io/v1
+kind: Catalog
+spec:
+  sources:
+  - repository: ghcr.io/fluxcd/agent-skills
+    tag: latest
+    targetAgents:
+    - claude-code
+    - kiro
+    verify:
+      provider: cosign
+      matchOIDCIdentity:
+      - issuer: https://token.actions.githubusercontent.com
+        subject: ^https://github\.com/fluxcd/.*$
+status:
+  inventory:
+  - id: 7d5f09ce
+    url: ghcr.io/fluxcd/agent-skills:latest
+    digest: sha256:ca93bbd5e0605821b0e3b2e8fd41df5a0280b9482437092ba1c585632196d2b1
+    lastUpdateAt: "2026-03-10T10:26:18Z"
+    annotations:
+      org.opencontainers.image.created: "2026-03-09T22:27:39+02:00"
+      org.opencontainers.image.revision: refs/heads/main@sha1:90e873c8e11cb9e08cd99241383168d8cc2c4e89
+      org.opencontainers.image.source: https://github.com/fluxcd/agent-skills
+    skills:
+    - name: gitops-cluster-debug
+      checksum: h1:XNNWGBTaK0j1zkeuytR/n8mvQfjnXZmlr9Ig7SbMitE=
+```
+
+The `id` field is an Adler-32 checksum of the repository URL, used to match inventory entries to their source. The `checksum` on each skill is a directory hash of installed skill contents, used for tamper detection during `skills update`.
+
+---
+
+## Multiple Sources
+
+Skills can be installed from multiple OCI repositories. Each skill name must be unique across all sources — the CLI rejects installations that would create name conflicts.
+
+```shell
+# Install community skills
+flux-operator skills install ghcr.io/fluxcd/agent-skills
+
+# Install internal org skills for GitHub Copilot
+flux-operator skills install ghcr.io/my-org/skills \
+  --agent github-copilot \
+  --skill my-skill \
+  --tag v2.0.0
+```
+
+Both sources appear in `catalog.yaml` and `skills update` checks all of them:
+
+```yaml
+apiVersion: agent.fluxcd.controlplane.io/v1
+kind: Catalog
+spec:
+  sources:
+  - repository: ghcr.io/fluxcd/agent-skills
+    tag: latest
+    verify:
+      provider: cosign
+      matchOIDCIdentity:
+      - issuer: https://token.actions.githubusercontent.com
+        subject: ^https://github\.com/fluxcd/.*$
+  - repository: ghcr.io/my-org/skills
+    tag: v2.0.0
+    targetAgents:
+    - github-copilot
+    targetSkills:
+    - my-skill
+    verify:
+      provider: cosign
+      matchOIDCIdentity:
+      - issuer: https://token.actions.githubusercontent.com
+        subject: ^https://github\.com/my-org/.*$
+```
+
+### Registry Authentication
+
+The `flux-operator` CLI uses the standard Docker configuration for registry authentication. It reads credentials from `~/.docker/config.json` and the `DOCKER_CONFIG` environment variable. In GitHub Actions, `docker/login-action` sets up credentials automatically.

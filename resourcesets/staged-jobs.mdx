@@ -1,0 +1,193 @@
+---
+title: "Run Database Migrations and Jobs with ResourceSet Steps"
+sidebarTitle: "Staged Jobs"
+description: "Use the ResourceSet steps API to run database migrations, app deployments, and post-deploy jobs in sequence with health-checking between each stage."
+---
+
+A common requirement when deploying applications is running one-off tasks in a specific order: a database migration must complete before the new version rolls out, and a cache warm-up or smoke test should run only after the rollout has finished. The `ResourceSet` API supports this workflow through `spec.steps` — an ordered list of named steps that combine Kubernetes `Job` resources with Flux appliers (`Kustomization`, `HelmRelease`). Each step's resources are applied and health-checked before the next step starts, and a failed step blocks the rest of the sequence.
+
+## Comparison with the Flux Kustomization Pattern
+
+The upstream Flux [running jobs](https://fluxcd.io/flux/use-cases/running-jobs/) use case implements this workflow with three `Kustomization` objects chained via `dependsOn` — one per stage, with separate directories in the repository. The ResourceSet steps map onto that pattern as follows:
+
+| Upstream Flux pattern | ResourceSet steps equivalent |
+|---|---|
+| `dependsOn` chain between Kustomizations | Step order |
+| Per-Kustomization `wait: true` | Implied wait between steps (final step gated by `spec.wait`) |
+| Per-Job Kustomization `force: true` | Per-Job `fluxcd.controlplane.io/force: enabled` annotation |
+| Per-Job Kustomization `timeout` | Per-step `timeout` |
+| Per-Job Kustomization `prune: true` | ResourceSet inventory-based garbage collection |
+
+Beyond replicating the upstream pattern, the single-object form gives you: one status, inventory, and history to inspect instead of three; no `dependsOn` requeue polling latency between stages; the opt-in `recreateOnFailure` annotation to retry permanently failed migrations; and version bumps that flow automatically from a registry scan through a single input, instead of Git edits in three places.
+
+## Example: Image-Triggered Staged Deployment
+
+This example combines a registry-scanning `ResourceSetInputProvider` with a three-step `ResourceSet` to implement a fully Gitless GitOps pipeline. When a new version of the `podinfo` image is published, the migration runs, the app is rolled out, and the cache warm-up runs — all in sequence.
+
+### Input Provider
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSetInputProvider
+metadata:
+  name: podinfo-image
+  namespace: apps
+  annotations:
+    fluxcd.controlplane.io/reconcileEvery: "10m"
+spec:
+  type: OCIArtifactTag
+  url: oci://ghcr.io/stefanprodan/podinfo
+  filter:
+    semver: "*"
+    limit: 1
+```
+
+### ResourceSet with Steps
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSet
+metadata:
+  name: podinfo
+  namespace: apps
+  annotations:
+    fluxcd.controlplane.io/reconcileEvery: "10m"
+spec:
+  inputsFrom:
+    - kind: ResourceSetInputProvider
+      name: podinfo-image
+  wait: true
+  steps:
+    - name: pre-deploy
+      timeout: 5m
+      resources:
+        - apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: db-migration
+            namespace: apps
+            annotations:
+              fluxcd.controlplane.io/force: enabled
+              fluxcd.controlplane.io/recreateOnFailure: enabled
+          spec:
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: migration
+                    image: ghcr.io/stefanprodan/podinfo:<< inputs.tag >>
+                    command: ["sh", "-c", "echo running db migration"]
+    - name: deploy
+      timeout: 10m
+      resources:
+        - apiVersion: kustomize.toolkit.fluxcd.io/v1
+          kind: Kustomization
+          metadata:
+            name: podinfo
+            namespace: apps
+          spec:
+            targetNamespace: apps
+            sourceRef:
+              kind: GitRepository
+              name: apps
+            path: deploy/podinfo
+            interval: 60m
+            prune: true
+            wait: true
+            timeout: 9m
+            images:
+              - name: ghcr.io/stefanprodan/podinfo
+                newTag: << inputs.tag | quote >>
+    - name: post-deploy
+      timeout: 5m
+      resources:
+        - apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: cache-warmup
+            namespace: apps
+            annotations:
+              fluxcd.controlplane.io/force: enabled
+              fluxcd.controlplane.io/recreateOnFailure: enabled
+          spec:
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: cache
+                    image: ghcr.io/stefanprodan/podinfo:<< inputs.tag >>
+                    command: ["sh", "-c", "echo refreshing cache"]
+```
+
+On reconciliation, the operator:
+
+1. Applies the `pre-deploy` step and waits up to **5 minutes** for the `db-migration` Job to complete.
+2. Applies the `deploy` step and waits up to **10 minutes** for the Flux `Kustomization` to become ready.
+3. Applies the `post-deploy` step. Because `spec.wait: true` is set on the `ResourceSet`, the `cache-warmup` Job is also health-checked before the reconciliation is considered successful.
+
+When the input provider detects a new image version, the `force` annotation on the Jobs causes the operator to delete and recreate them so the migration and cache warm-up run again for the new version.
+
+## Re-Running Jobs
+
+Kubernetes Job specs are immutable, so the supported re-run mechanism is the `fluxcd.controlplane.io/force: enabled` annotation. When the rendered Job spec changes (e.g., the image tag changes from a new input), the operator deletes and recreates the Job. With an unchanged spec, re-applying a completed Job is a no-op.
+
+A Job that has failed permanently (its `backoffLimit` is exhausted) will keep the `ResourceSet` in `Ready=False` until the Job spec or an input changes. To automatically retry failed Jobs, add the `recreateOnFailure` annotation:
+
+```yaml
+metadata:
+  annotations:
+    fluxcd.controlplane.io/force: enabled
+    fluxcd.controlplane.io/recreateOnFailure: enabled
+```
+
+Before applying a step, the operator deletes any Job in that step carrying this annotation that has `Failed=True`, then recreates it.
+
+<Warning>
+  Only use `recreateOnFailure` for **idempotent Jobs**. A non-idempotent migration would be re-run on every reconciliation until it succeeds, repeating any partial changes it made before failing.
+</Warning>
+
+## Triggering Rollouts on Data-Only Changes
+
+When input changes affect only ConfigMap or Secret contents (not the Job or Kustomization spec), the pods may not restart automatically. Use the `sha256sum` template function to hash the inputs and inject the result as a pod annotation, forcing a rolling update:
+
+```yaml
+- apiVersion: kustomize.toolkit.fluxcd.io/v1
+  kind: Kustomization
+  spec:
+    patches:
+      - target:
+          kind: Deployment
+        patch: |
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: all
+          spec:
+            template:
+              metadata:
+                annotations:
+                  config-checksum: << inputs.config | toYaml | sha256sum | quote >>
+```
+
+When the workload is defined directly in a step (without a Flux applier), the `checksumFrom` annotation on the pod template watches a ConfigMap or Secret and the step health check waits on the workload rollout itself.
+
+## Job Lifecycle Caveats
+
+<Warning>
+  Do **not** set `ttlSecondsAfterFinished` on Jobs managed by a ResourceSet. When the TTL controller deletes a completed Job, the operator detects the missing resource as drift on the next reconciliation and re-applies it, causing the migration to run again unexpectedly.
+</Warning>
+
+To keep a record of past Job runs while creating a new Job per version, template the Job name from an input revision:
+
+```yaml
+metadata:
+  name: db-migration-<< inputs.tag >>
+```
+
+Each version bump creates a new Job, and the previous one is removed by garbage collection after the sequence succeeds.
+
+## Copying Data Between Steps
+
+The `copyFrom` annotation reads from the cluster **before the first step runs**. A resource in a later step cannot copy data from a Secret or ConfigMap created by an earlier step in the same reconciliation.
+
+The only step-safe cross-reference is `checksumFrom` pointing at ConfigMaps or Secrets generated by the same ResourceSet — those references are resolved in-memory from the pending apply, regardless of which step defines them.

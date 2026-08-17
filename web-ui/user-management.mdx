@@ -1,0 +1,335 @@
+---
+title: "Manage Users and RBAC for the Flux Web UI"
+sidebarTitle: "User Management"
+description: "Configure anonymous access, OAuth2/OIDC authentication, predefined ClusterRoles, namespace filtering, and CEL-based claims mapping for the Flux Web UI."
+---
+
+By default, the Flux Operator exposes the Web UI without authentication, providing read-only access to all Flux resources in the cluster. Users can view the current state of Flux reconcilers and their managed resources, but cannot access sensitive data such as Kubernetes Secrets and ConfigMaps. For production environments, restrict access using Single Sign-On and Kubernetes RBAC policies.
+
+## Anonymous Access
+
+In the default no-authentication mode the Web UI runs under the `flux-operator` Kubernetes service account. Cluster admins can assign a fixed identity to every visitor using the `Anonymous` authentication type. All users then share that identity's RBAC permissions — suitable only for trusted, internal networks.
+
+To assign the `flux` username and `flux-admin` group to every anonymous visitor:
+
+```yaml
+web:
+  config:
+    authentication:
+      type: Anonymous
+      anonymous:
+        username: flux
+        groups:
+          - flux-admin
+```
+
+Grant that group full Web UI permissions with a `ClusterRoleBinding`:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: flux-admin
+subjects:
+  - kind: Group
+    name: flux-admin
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: flux-web-admin
+  apiGroup: rbac.authorization.k8s.io
+```
+
+<Warning>
+  Anyone who can reach the Web UI URL inherits the anonymous identity's permissions. Use this mode only when the UI is accessible exclusively to trusted users in a secured network.
+</Warning>
+
+## Single Sign-On (OAuth2 / OIDC)
+
+To restrict access, enable OAuth2 authentication against any OpenID Connect (OIDC)-compliant provider such as Dex, Keycloak, Okta, or Auth0. When `OAuth2` is configured, `baseURL` must be set so the server can construct the OAuth2 redirect URI correctly.
+
+```yaml
+web:
+  config:
+    baseURL: https://flux-operator.example.com
+    authentication:
+      type: OAuth2
+      oauth2:
+        provider: OIDC
+        clientID: <DEX-CLIENT-ID>
+        clientSecret: <DEX-CLIENT-SECRET>
+        issuerURL: https://dex.example.com
+```
+
+The default OIDC scopes requested are `openid`, `offline_access`, `profile`, `email`, and `groups`. Override them with `scopes` if your provider requires different values.
+
+<Note>
+  Access granted through the ID token persists until the token expires, even if the user is removed from a group in the identity provider. For environments that require immediate revocation, configure your provider to issue short-lived tokens.
+</Note>
+
+For complete provider-specific walkthroughs see the [SSO guide](/web-ui/sso).
+
+### Claims Mapping to RBAC
+
+After a successful login, the operator extracts the **username** and **groups** from the ID token and uses them to impersonate a Kubernetes user when forwarding API requests. By default:
+
+- `username` → `has(claims.email) ? claims.email : ''`
+- `groups` → `has(claims.groups) ? claims.groups : []`
+
+These defaults work with most providers. To adapt to custom token shapes, use the CEL-based claims processor described in the next section.
+
+#### Example: grant the `platform-team` group full access
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: flux-web-platform-team
+subjects:
+  - kind: Group
+    name: platform-team
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: flux-web-admin
+  apiGroup: rbac.authorization.k8s.io
+```
+
+#### Example: grant the `dev-team` group read-only access to the `apps` namespace
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flux-web-dev-team
+  namespace: apps
+subjects:
+  - kind: Group
+    name: dev-team
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: flux-web-user
+  apiGroup: rbac.authorization.k8s.io
+```
+
+Users who belong to no group with assigned bindings can still log in but see only the main dashboard with controller readiness counts — no resource details.
+
+## CEL-Based Claims Processing
+
+The OIDC provider uses [Common Expression Language (CEL)](https://cel.dev/overview/cel-overview) expressions to extract and validate claims. Four sections are available under `oauth2`:
+
+### Variables
+
+Extract and transform claim values into named variables that can be reused across other expressions. Variables are evaluated in order and may reference previously declared variables.
+
+```yaml
+oauth2:
+  # ...
+  variables:
+    - name: username
+      expression: "claims.sub"
+    - name: domain
+      expression: "claims.email.split('@')[1]"
+    - name: departments
+      expression: "claims.groups.filter(g, g.startsWith('dept:')).map(g, g.substring(5))"
+```
+
+### Validations
+
+Gate access by asserting conditions on claims or variables. Each expression must return `bool`; authentication fails with the provided `message` if any expression returns `false`.
+
+```yaml
+oauth2:
+  # ...
+  variables:
+    - name: domain
+      expression: "claims.email.split('@')[1]"
+  validations:
+    - expression: "variables.domain == 'example.com'"
+      message: "email domain not allowed"
+    - expression: "size(claims.groups) > 0"
+      message: "user must belong to at least one group"
+```
+
+### Profile
+
+Controls the display name shown in the Web UI header.
+
+```yaml
+oauth2:
+  # ...
+  profile:
+    name: "claims.name"
+```
+
+Default: `"has(claims.name) ? claims.name : (has(claims.email) ? claims.email : '')"`
+
+### Impersonation
+
+Overrides which username and groups are forwarded to the Kubernetes API for RBAC evaluation. At least one must resolve to a non-empty value.
+
+```yaml
+oauth2:
+  # ...
+  impersonation:
+    username: "claims.email"
+    groups: "claims.groups"
+```
+
+A more advanced example that extracts department groups from prefixed claims:
+
+```yaml
+oauth2:
+  # ...
+  variables:
+    - name: username
+      expression: "claims.sub"
+    - name: departments
+      expression: "claims.groups.filter(g, g.startsWith('dept:')).map(g, g.substring(5))"
+  impersonation:
+    username: "variables.username"
+    groups: "variables.departments"
+```
+
+## Role-Based Access Control
+
+The Web UI impersonates the authenticated user for every Kubernetes API call, meaning the Flux Operator enforces the user's own RBAC — it adds no permissions the user doesn't already hold.
+
+### Namespace Filtering
+
+The namespace picker dropdown is populated based on the `get` RBAC verb for the `ResourceSet` kind. The Web UI performs a `SelfSubjectAccessReview` in each namespace, and only namespaces where the user has `get` on `ResourceSet` are shown. Users without access to any namespace see the warning:
+
+> **Limited Access — You don't have access to any namespaces**
+
+### Predefined Roles
+
+The Flux Operator ships two `ClusterRole` resources:
+
+<Tabs>
+  <Tab title="flux-web-user">
+    Read-only access to all resources. Suitable for developers who need to observe the state of their managed resources.
+
+    ```yaml
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRole
+    metadata:
+      name: flux-web-user
+      labels:
+        app.kubernetes.io/part-of: flux-operator
+    rules:
+      - apiGroups: ["*"]
+        resources: ["*"]
+        verbs:
+          - get
+          - list
+          - watch
+    ```
+  </Tab>
+  <Tab title="flux-web-admin">
+    Full access including the ability to trigger actions. The custom verbs (`reconcile`, `suspend`, `resume`, `download`, `restart`) are Flux Operator–specific and scope actions precisely.
+
+    ```yaml
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRole
+    metadata:
+      name: flux-web-admin
+      labels:
+        app.kubernetes.io/part-of: flux-operator
+    rules:
+      - apiGroups: ["*"]
+        resources: ["*"]
+        verbs:
+          - get
+          - list
+          - watch
+      - apiGroups:
+          - fluxcd.controlplane.io
+          - source.toolkit.fluxcd.io
+          - source.extensions.fluxcd.io
+          - kustomize.toolkit.fluxcd.io
+          - helm.toolkit.fluxcd.io
+          - image.toolkit.fluxcd.io
+          - notification.toolkit.fluxcd.io
+        resources: ["*"]
+        verbs:
+          - patch
+          - reconcile
+          - suspend
+          - resume
+          - download
+      - apiGroups:
+          - apps
+        resources:
+          - deployments
+          - statefulsets
+          - daemonsets
+        verbs:
+          - patch
+          - restart
+      - apiGroups:
+          - batch
+        resources:
+          - cronjobs
+          - jobs
+        verbs:
+          - create
+          - restart
+      - apiGroups:
+          - ""
+        resources:
+          - pods
+        verbs:
+          - delete
+      - apiGroups:
+          - ""
+        resources:
+          - pods/log
+        verbs:
+          - get
+    ```
+  </Tab>
+</Tabs>
+
+<Tip>
+  The `patch` verb alone is not sufficient to trigger actions in the Web UI. The user must also hold the specific action verb (`reconcile`, `suspend`, `resume`, `download`, or `restart`) for the target resource type. These verbs are defined by the Flux Operator specifically to enable fine-grained action control.
+</Tip>
+
+To disable automatic creation of the predefined roles and manage them yourself via GitOps:
+
+```yaml
+web:
+  rbac:
+    createRoles: false
+```
+
+## Access Modes for Actions
+
+The `userActions.access` field controls how the Web UI performs mutations on behalf of an authenticated user:
+
+| Mode | User needs | Web UI service account needs |
+|---|---|---|
+| `Impersonated` (default) | Per-action verb **and** native verbs (e.g. `patch`) | Nothing extra |
+| `FineGrained` | Per-action verb only | Native verbs (e.g. `patch`, `create`) |
+
+`FineGrained` mode enables stricter least-privilege setups where developers can, for example, be granted `suspend` on Kustomizations without also gaining the ability to `patch` arbitrary resources with `kubectl`. Configure it via Helm:
+
+```yaml
+web:
+  config:
+    userActions:
+      access: FineGrained
+```
+
+For a standalone Web UI deployment, also set the chart-level value so the service account is granted the required native permissions:
+
+```yaml
+web:
+  config:
+    userActions:
+      access: FineGrained
+  userActions:
+    access: FineGrained
+```
+
+See [Actions](/web-ui/actions) for full details on per-action RBAC requirements.

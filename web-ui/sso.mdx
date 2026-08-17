@@ -1,0 +1,604 @@
+---
+title: "Configure Single Sign-On for the Flux Web UI"
+sidebarTitle: "SSO"
+description: "Set up OAuth2/OIDC Single Sign-On for the Flux Web UI using Dex, Keycloak, Microsoft Entra, or OpenShift as your identity provider."
+---
+
+The Flux Web UI supports Single Sign-On (SSO) via OAuth2 with any OpenID Connect (OIDC)-compliant identity provider. SSO restricts access to authenticated users and allows you to map identity provider groups directly to Kubernetes RBAC roles, giving platform teams fine-grained control over who can view or act on GitOps resources. The sections below provide step-by-step configuration for the most common providers.
+
+<Tabs>
+  <Tab title="Dex">
+    [Dex](https://dexidp.io) is an open-source OIDC federation layer that can relay authentication to GitHub, GitLab, Google, Microsoft, OpenShift, and many other upstream providers. It is a popular choice for self-hosted Kubernetes environments.
+
+    ## Create the Client Secret
+
+    Generate a random client secret and store it in a Kubernetes Secret:
+
+    ```bash
+    kubectl create secret generic flux-web-client \
+      --from-literal=client-id=flux-web \
+      --from-literal=client-secret=$(openssl rand -hex 32) \
+      -n flux-system
+    ```
+
+    <Note>
+      In production, store the Secret encrypted in Git or inject it via an external secrets operator rather than creating it imperatively.
+    </Note>
+
+    ## Configure the Flux Operator
+
+    Update the Flux Operator HelmRelease to enable OAuth2 authentication pointed at your Dex instance:
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: ResourceSet
+    metadata:
+      name: flux-operator
+      namespace: flux-system
+    spec:
+      inputs:
+        - domain: "<your-domain>"
+          ingressClass: "<your-ingress-class>"
+      resources:
+        - apiVersion: helm.toolkit.fluxcd.io/v2
+          kind: HelmRelease
+          metadata:
+            name: << inputs.provider.name >>
+            namespace: << inputs.provider.namespace >>
+          spec:
+            interval: 30m
+            releaseName: << inputs.provider.name >>
+            serviceAccountName: << inputs.provider.name >>
+            chartRef:
+              kind: OCIRepository
+              name: << inputs.provider.name >>
+            values:
+              web:
+                config:
+                  baseURL: "https://flux.<< inputs.domain >>"
+                  authentication:
+                    type: OAuth2
+                    oauth2:
+                      provider: OIDC
+                      issuerURL: "https://dex.<< inputs.domain >>"
+                ingress:
+                  enabled: true
+                  className: << inputs.ingressClass >>
+                  hosts:
+                    - host: flux.<< inputs.domain >>
+                      paths:
+                        - path: /
+                          pathType: Prefix
+                  tls:
+                    - secretName: cluster-tls
+                      hosts:
+                        - "*.<< inputs.domain >>"
+            valuesFrom:
+              - kind: Secret
+                name: flux-web-client
+                valuesKey: client-id
+                targetPath: web.config.authentication.oauth2.clientID
+              - kind: Secret
+                name: flux-web-client
+                valuesKey: client-secret
+                targetPath: web.config.authentication.oauth2.clientSecret
+    ```
+
+    ## Deploy Dex with Static Users
+
+    For a self-contained setup with a local user database:
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: ResourceSet
+    metadata:
+      name: dex
+      namespace: flux-system
+      annotations:
+        fluxcd.controlplane.io/reconcileEvery: "30m"
+        fluxcd.controlplane.io/reconcileTimeout: "5m"
+    spec:
+      wait: true
+      inputs:
+        - domain: "<your-domain>"
+          ingressClass: "<your-ingress-class>"
+      resources:
+        - apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: dex
+        - apiVersion: v1
+          kind: Secret
+          metadata:
+            name: flux-web-client
+            namespace: dex
+            annotations:
+              fluxcd.controlplane.io/copyFrom: "flux-system/flux-web-client"
+        - apiVersion: helm.toolkit.fluxcd.io/v2
+          kind: HelmRelease
+          metadata:
+            name: dex
+            namespace: dex
+          spec:
+            chart:
+              spec:
+                chart: dex
+                version: "*"
+                sourceRef:
+                  kind: HelmRepository
+                  name: dex
+            interval: 1h
+            releaseName: dex
+            values:
+              config:
+                issuer: "https://dex.<< inputs.domain >>"
+                storage:
+                  type: memory
+                staticClients:
+                  - id: flux-web
+                    redirectURIs:
+                      - "https://flux.<< inputs.domain >>/oauth2/callback"
+                enablePasswordDB: true
+                staticPasswords:
+                  - email: "admin@<< inputs.domain >>"
+                    # bcrypt hash of the string "password": $(echo password | htpasswd -BinC 10 admin | cut -d: -f2)
+                    hash: "$2y$10$KR7JHCQ1BxNAKBOR/ixKqevGKtvtZnpgwvV/jF80eN5zLHVHx24E2"
+                    username: "admin"
+                    userID: "08a8684b-db88-4b73-90a9-3cd1661f5466"
+              ingress:
+                enabled: true
+                className: "<< inputs.ingressClass >>"
+                hosts:
+                  - host: "dex.<< inputs.domain >>"
+                    paths:
+                      - path: /
+                        pathType: ImplementationSpecific
+                tls:
+                  - secretName: cluster-tls
+                    hosts:
+                      - "*.<< inputs.domain >>"
+            valuesFrom:
+              - kind: Secret
+                name: flux-web-client
+                valuesKey: client-id
+                targetPath: config.staticClients[0].name
+              - kind: Secret
+                name: flux-web-client
+                valuesKey: client-secret
+                targetPath: config.staticClients[0].secret
+    ```
+
+    ### RBAC for Static Users
+
+    Bind the `admin@<your-domain>` user to the `flux-web-admin` ClusterRole:
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: ResourceSet
+    metadata:
+      name: flux-web-users
+      namespace: flux-system
+    spec:
+      inputs:
+        - domain: "<your-domain>"
+          username: "admin"
+      resources:
+        - apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: flux-web-<< inputs.username >>
+          subjects:
+            - kind: User
+              name: << inputs.username >>@<< inputs.domain >>
+              apiGroup: rbac.authorization.k8s.io
+          roleRef:
+            kind: ClusterRole
+            name: flux-web-admin
+            apiGroup: rbac.authorization.k8s.io
+    ```
+
+    ## Deploy Dex with GitHub OAuth
+
+    To federate authentication through your GitHub organization, create a GitHub OAuth App with the callback URL set to `https://dex.<your-domain>/callback`, then store the credentials:
+
+    ```bash
+    kubectl create secret generic dex-github-client \
+      --from-literal=client-id=<your-github-client-id> \
+      --from-literal=client-secret=<your-github-client-secret> \
+      -n flux-system
+    ```
+
+    Deploy Dex with the GitHub connector:
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: ResourceSet
+    metadata:
+      name: dex
+      namespace: flux-system
+      annotations:
+        fluxcd.controlplane.io/reconcileEvery: "30m"
+        fluxcd.controlplane.io/reconcileTimeout: "5m"
+    spec:
+      wait: true
+      inputs:
+        - domain: "<your-domain>"
+          ingressClass: "<your-ingress-class>"
+          org: "<your-github-org>"
+      resources:
+        - apiVersion: helm.toolkit.fluxcd.io/v2
+          kind: HelmRelease
+          metadata:
+            name: dex
+            namespace: dex
+          spec:
+            interval: 1h
+            releaseName: dex
+            values:
+              config:
+                issuer: "https://dex.<< inputs.domain >>"
+                storage:
+                  type: memory
+                staticClients:
+                  - id: flux-web
+                    redirectURIs:
+                      - "https://flux.<< inputs.domain >>/oauth2/callback"
+                connectors:
+                  - type: github
+                    id: github
+                    name: GitHub
+                    config:
+                      redirectURI: "https://dex.<< inputs.domain >>/callback"
+                      orgs:
+                        - name: "<< inputs.org >>"
+                      teamNameField: slug
+            valuesFrom:
+              - kind: Secret
+                name: flux-web-client
+                valuesKey: client-id
+                targetPath: config.staticClients[0].name
+              - kind: Secret
+                name: flux-web-client
+                valuesKey: client-secret
+                targetPath: config.staticClients[0].secret
+              - kind: Secret
+                name: dex-github-client
+                valuesKey: client-id
+                targetPath: config.connectors[0].config.clientID
+              - kind: Secret
+                name: dex-github-client
+                valuesKey: client-secret
+                targetPath: config.connectors[0].config.clientSecret
+    ```
+
+    ### RBAC for GitHub Teams
+
+    Bind the `admins` team to `flux-web-admin` (cluster-wide):
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: ResourceSet
+    metadata:
+      name: flux-web-admins
+      namespace: flux-system
+    spec:
+      inputs:
+        - org: "<your-github-org>"
+          team: "admins"
+      resources:
+        - apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: flux-web-<< inputs.team >>
+          subjects:
+            - kind: Group
+              name: "<< inputs.org >>:<< inputs.team >>"
+              apiGroup: rbac.authorization.k8s.io
+          roleRef:
+            kind: ClusterRole
+            name: flux-web-admin
+            apiGroup: rbac.authorization.k8s.io
+    ```
+
+    For per-namespace access with multiple dev teams:
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: ResourceSet
+    metadata:
+      name: flux-web-devs
+      namespace: flux-system
+    spec:
+      inputs:
+        - org: "<your-github-org>"
+          team: "dev-team-1"
+          namespace: "apps-1"
+        - org: "<your-github-org>"
+          team: "dev-team-2"
+          namespace: "apps-2"
+      resources:
+        - apiVersion: rbac.authorization.k8s.io/v1
+          kind: RoleBinding
+          metadata:
+            name: flux-web-<< inputs.team >>
+            namespace: "<< inputs.namespace >>"
+          subjects:
+            - kind: Group
+              name: "<< inputs.org >>:<< inputs.team >>"
+              apiGroup: rbac.authorization.k8s.io
+          roleRef:
+            kind: ClusterRole
+            name: flux-web-admin
+            apiGroup: rbac.authorization.k8s.io
+    ```
+  </Tab>
+
+  <Tab title="Keycloak">
+    [Keycloak](https://www.keycloak.org/) is a widely deployed open-source identity and access management server with native Kubernetes OIDC support.
+
+    ## Create the Keycloak Client
+
+    In the Keycloak admin console:
+
+    <Steps>
+      <Step title="Create a new client">
+        Navigate to **Clients** → **Create client**. Set **Client type** to `OpenID Connect` and **Client ID** to `flux-web`.
+      </Step>
+      <Step title="Enable authentication">
+        Click **Next**, enable **Client authentication**, and in **Authentication flow** enable **Standard flow** and **Direct access grants**.
+      </Step>
+      <Step title="Configure redirect URIs">
+        Click **Next** and set:
+        - **Home URL**: `https://flux.<your-domain>`
+        - **Valid redirect URIs**: `https://flux.<your-domain>/oauth2/callback`
+      </Step>
+      <Step title="Copy the client secret">
+        Click **Save**, then go to the **Credentials** tab and copy the **Client secret**.
+      </Step>
+    </Steps>
+
+    Store the credentials in a Kubernetes Secret:
+
+    ```bash
+    kubectl create secret generic flux-web-client \
+      --from-literal=client-id=flux-web \
+      --from-literal=client-secret=KEYCLOAK-CLIENT-SECRET \
+      -n flux-system
+    ```
+
+    ## Configure the Flux Operator
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: ResourceSet
+    metadata:
+      name: flux-operator
+      namespace: flux-system
+    spec:
+      inputs:
+        - domain: "<your-domain>"
+          ingressClass: "<your-ingress-class>"
+      resources:
+        - apiVersion: helm.toolkit.fluxcd.io/v2
+          kind: HelmRelease
+          metadata:
+            name: << inputs.provider.name >>
+            namespace: << inputs.provider.namespace >>
+          spec:
+            interval: 30m
+            releaseName: << inputs.provider.name >>
+            serviceAccountName: << inputs.provider.name >>
+            chartRef:
+              kind: OCIRepository
+              name: << inputs.provider.name >>
+            values:
+              web:
+                config:
+                  baseURL: "https://flux.<< inputs.domain >>"
+                  authentication:
+                    type: OAuth2
+                    oauth2:
+                      provider: OIDC
+                      issuerURL: "https://keycloak.<< inputs.domain >>"
+                ingress:
+                  enabled: true
+                  className: << inputs.ingressClass >>
+                  hosts:
+                    - host: flux.<< inputs.domain >>
+                      paths:
+                        - path: /
+                          pathType: Prefix
+                  tls:
+                    - secretName: cluster-tls
+                      hosts:
+                        - "*.<< inputs.domain >>"
+            valuesFrom:
+              - kind: Secret
+                name: flux-web-client
+                valuesKey: client-id
+                targetPath: web.config.authentication.oauth2.clientID
+              - kind: Secret
+                name: flux-web-client
+                valuesKey: client-secret
+                targetPath: web.config.authentication.oauth2.clientSecret
+    ```
+
+    ## RBAC with Keycloak Groups
+
+    Bind the `admins` group to `flux-web-admin` cluster-wide:
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: ResourceSet
+    metadata:
+      name: flux-web-admins
+      namespace: flux-system
+    spec:
+      inputs:
+        - group: "admins"
+      resources:
+        - apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: flux-web-<< inputs.group >>
+          subjects:
+            - kind: Group
+              name: "<< inputs.group >>"
+              apiGroup: rbac.authorization.k8s.io
+          roleRef:
+            kind: ClusterRole
+            name: flux-web-admin
+            apiGroup: rbac.authorization.k8s.io
+    ```
+
+    For per-namespace bindings with multiple dev teams:
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: ResourceSet
+    metadata:
+      name: flux-web-devs
+      namespace: flux-system
+    spec:
+      inputs:
+        - group: "dev-team-1"
+          namespace: "apps-1"
+        - group: "dev-team-2"
+          namespace: "apps-2"
+      resources:
+        - apiVersion: rbac.authorization.k8s.io/v1
+          kind: RoleBinding
+          metadata:
+            name: flux-web-<< inputs.group >>
+            namespace: "<< inputs.namespace >>"
+          subjects:
+            - kind: Group
+              name: "<< inputs.group >>"
+              apiGroup: rbac.authorization.k8s.io
+          roleRef:
+            kind: ClusterRole
+            name: flux-web-admin
+            apiGroup: rbac.authorization.k8s.io
+    ```
+  </Tab>
+
+  <Tab title="Microsoft Entra">
+    Microsoft Entra (formerly Azure Active Directory) can be integrated either directly via its OIDC endpoint, or indirectly through Dex for advanced group filtering.
+
+    ## Direct Integration
+
+    In the Azure portal, register an application and configure:
+    - **Redirect URI**: `https://flux-status.example.com/oauth2/callback`
+    - **Client secret**: created under **Certificates & secrets**
+    - **Groups claim**: enabled via **Token configuration** → optional claims
+
+    Then configure the Flux Operator Helm chart:
+
+    ```yaml
+    web:
+      config:
+        baseURL: https://flux-status.example.com
+        authentication:
+          type: OAuth2
+          oauth2:
+            provider: OIDC
+
+            # App registration's "Application (client) ID" value.
+            clientID: 2d01bd48-7914-4b50-9667-068be6afd2f2
+
+            # App registration's "Client secret" value.
+            clientSecret: "O.y8Q~MGIm9B.ahUlOx376EP7l5mu9xgIet6hdBD"
+
+            # URL containing tenant ID.
+            issuerURL: https://login.microsoftonline.com/4bd94393-a3a0-ab26-4c05-bfc69377f6c0/v2.0
+
+            # Scopes supported by Microsoft Entra OIDC.
+            scopes: [openid, profile, email, offline_access]
+    ```
+
+    <Warning>
+      On Azure free-tier plans, the `groups` claim contains **UUIDs** instead of group names. To receive human-readable group names you must either use a paid plan with "Groups assigned to the application" type, or route authentication through Dex with the Microsoft connector (see below). The Web UI supports a maximum of 35 KiB for the entire HTTP cookie used to store the ID token.
+    </Warning>
+
+    ## Via Dex (Recommended for Group Names)
+
+    Using Dex as an intermediate provider gives you full control over which groups are included in the token. Configure the Dex Microsoft connector:
+
+    ```yaml
+    connectors:
+      - type: microsoft
+        id: microsoft
+        name: Microsoft
+        config:
+          clientID: 2d01bd48-7914-4b50-9667-068be6afd2f2
+          clientSecret: "O.y8Q~MGIm9B.ahUlOx376EP7l5mu9xgIet6hdBD"
+          redirectURI: https://dex.example.com/callback
+          onlySecurityGroups: true   # only groups created with the "Security" type
+          useGroupsAsWhitelist: true # only include groups listed in "groups" below
+          groups: # user needs at least one of these groups to be authenticated
+            - dev-team
+            - platform-team
+    ```
+
+    The `useGroupsAsWhitelist` and `groups` filter keeps the ID token small and ensures only relevant groups reach the Kubernetes RBAC engine. After configuring the connector, follow the [Dex tab](#) instructions to wire up the Flux Operator.
+
+    For more information see the [Dex Microsoft connector docs](https://dexidp.io/docs/connectors/microsoft/) and the Microsoft Entra guide on [configuring optional group claims](https://learn.microsoft.com/en-us/entra/identity-platform/optional-claims#configure-groups-optional-claims).
+  </Tab>
+
+  <Tab title="OpenShift">
+    When deploying the Flux Operator through the Operator Lifecycle Manager (OLM) on OpenShift, the Web UI configuration is passed via a Kubernetes Secret referenced by the `WEB_CONFIG_SECRET_NAME` environment variable in the `Subscription`.
+
+    ## Configure via OLM Subscription
+
+    ```yaml
+    apiVersion: operators.coreos.com/v1alpha1
+    kind: Subscription
+    metadata:
+      name: flux-operator
+      namespace: flux-system
+    spec:
+      channel: stable
+      name: flux-operator
+      source: operatorhubio-catalog
+      sourceNamespace: olm
+      config:
+        env:
+          - name: WEB_CONFIG_SECRET_NAME
+            value: "flux-web-config"
+    ```
+
+    The Flux Operator watches the named Secret for changes and reconfigures the Web UI without downtime.
+
+    ## Create the Config Secret
+
+    The Secret must contain a key named `config.yaml` holding the Web UI configuration:
+
+    ```yaml
+    apiVersion: v1
+    kind: Secret
+    metadata:
+      name: flux-web-config
+      namespace: flux-system
+    type: Opaque
+    stringData:
+      config.yaml: |
+        apiVersion: web.fluxcd.controlplane.io/v1
+        kind: Config
+        spec:
+          baseURL: https://flux.example.com
+          authentication:
+            type: OAuth2
+            oauth2:
+              provider: OIDC
+              clientID: flux-web
+              clientSecret: flux-web-secret
+              issuerURL: https://dex.example.com
+    ```
+
+    ## Authentication Using OpenShift Users and Groups
+
+    To authenticate with OpenShift-native users and groups, deploy Dex with the [OpenShift connector](https://dexidp.io/docs/connectors/openshift/). This allows users to log in to the Web UI using their OpenShift credentials, and their OpenShift group memberships are reflected in Kubernetes RBAC policies.
+
+    After Dex is configured, point the Web UI at the Dex issuer URL using the same OAuth2/OIDC configuration shown above.
+  </Tab>
+</Tabs>

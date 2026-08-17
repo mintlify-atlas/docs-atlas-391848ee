@@ -1,0 +1,141 @@
+---
+title: "Flux Web UI: Real-Time GitOps Pipeline Visibility"
+sidebarTitle: "Overview"
+description: "Explore the Flux Web UI — a real-time dashboard for GitOps pipeline status, reconciliation health, and workload visibility on port 9080."
+---
+
+The Flux Web UI is a browser-based dashboard bundled with the Flux Operator that gives platform teams and developers a live view of every GitOps resource in the cluster. It surfaces reconciliation status, readiness conditions, workload inventory, resource usage charts, and an audit trail of user actions — all scoped to each user's Kubernetes RBAC permissions. The UI is served on port **9080** under the `http-web` port name and is available immediately after the Flux Operator is installed; no extra components are required.
+
+## Quick Start
+
+<Steps>
+  <Step title="Install the Flux Operator">
+    Deploy the operator using its Helm chart. The Web UI is **enabled by default** and starts serving on port 9080 as part of the operator pod.
+
+    ```shell
+    helm install flux-operator oci://ghcr.io/controlplaneio-fluxcd/charts/flux-operator \
+      --namespace flux-system \
+      --create-namespace
+    ```
+  </Step>
+
+  <Step title="Port-forward to your workstation">
+    Access the dashboard locally without any Ingress configuration:
+
+    ```shell
+    kubectl -n flux-system port-forward svc/flux-operator 9080:9080
+    ```
+
+    Open [http://localhost:9080](http://localhost:9080) in your browser.
+  </Step>
+
+  <Step title="Enable authentication (recommended)">
+    By default the UI runs in read-only mode under the `flux-operator` service account. For multi-user environments, configure OAuth2/OIDC authentication and RBAC. See [User Management](/web-ui/user-management) for details.
+  </Step>
+</Steps>
+
+## What the Dashboard Shows
+
+The main dashboard aggregates a **FluxReport** built by scanning every Flux custom resource across all namespaces. The report is refreshed in the background and filtered to the namespaces each authenticated user can access. Key panels include:
+
+- **Reconcilers summary** — counts and readiness percentages for Kustomizations, HelmReleases, and source resources.
+- **Workload inventory** — Deployments, StatefulSets, DaemonSets, and CronJobs linked to the Flux resources that manage them.
+- **Resource usage charts** — CPU and memory history sourced from the Kubernetes Metrics API (hidden automatically when metrics-server is absent).
+- **Quick search** — find any Flux resource or managed workload across the cluster.
+
+<Note>
+  Sensitive data such as Kubernetes Secrets and ConfigMap values is never surfaced by the Web UI, regardless of the user's RBAC permissions.
+</Note>
+
+## WebConfig API
+
+The Web UI server is configured through the `web.fluxcd.controlplane.io/v1` Config API. A YAML file passed via `--web-config=<path>` (or managed through Helm values under `web.config`) controls:
+
+| Field | Purpose |
+|---|---|
+| `spec.baseURL` | Public URL — required for OAuth2 redirect handling |
+| `spec.authentication` | `Anonymous` or `OAuth2` (OIDC) with CEL claims mapping |
+| `spec.userActions.audit` | List of actions to audit (or `["*"]` for all) |
+| `spec.userActions.access` | `Impersonated` (default) or `FineGrained` |
+| `spec.search.cached` | Serve resource listings from an in-memory cache |
+| `spec.metrics.disabled` | Hide resource usage charts and stop scraping Metrics API |
+
+A minimal OIDC configuration looks like:
+
+```yaml
+apiVersion: web.fluxcd.controlplane.io/v1
+kind: Config
+spec:
+  baseURL: https://flux-web.example.com
+  authentication:
+    type: OAuth2
+    oauth2:
+      provider: OIDC
+      clientID: flux-web
+      clientSecret: my-client-secret
+      issuerURL: https://dex.example.com
+```
+
+When using the Helm chart, these values are set under `web.config`:
+
+```yaml
+web:
+  config:
+    baseURL: https://flux-web.example.com
+    authentication:
+      type: OAuth2
+      oauth2:
+        provider: OIDC
+        clientID: flux-web
+        clientSecret: my-client-secret
+        issuerURL: https://dex.example.com
+```
+
+## Predefined ClusterRoles
+
+The Flux Operator ships two `ClusterRole` resources that are ready to bind to users or groups:
+
+| Role | Permissions |
+|---|---|
+| `flux-web-user` | `get`, `list`, `watch` on all resources — read-only access |
+| `flux-web-admin` | All of the above plus `patch`, `reconcile`, `suspend`, `resume`, `download`, `restart`, and `delete` on Flux and workload resources |
+
+To disable automatic creation of these roles (for example when managing them yourself via GitOps):
+
+```yaml
+web:
+  rbac:
+    createRoles: false
+```
+
+## Standalone Deployment
+
+If you need to isolate the Web UI from the main Flux Operator installation — for example, to scale it independently or deploy it on a read-only cluster — you can run it as a separate Helm release with `web.serverOnly: true` and `installCRDs: false`:
+
+```yaml
+web:
+  serverOnly: true
+```
+
+In standalone mode, port-forward the dedicated service:
+
+```shell
+kubectl -n flux-system port-forward svc/flux-web 9080:9080
+```
+
+## Further Reading
+
+<CardGroup cols={2}>
+  <Card title="User Management" icon="users" href="/web-ui/user-management">
+    Configure anonymous access, OAuth2/OIDC, RBAC roles, and CEL claims mapping.
+  </Card>
+  <Card title="Actions" icon="play" href="/web-ui/actions">
+    Reconcile, suspend, restart workloads, and configure audit logging.
+  </Card>
+  <Card title="Single Sign-On" icon="key" href="/web-ui/sso">
+    Step-by-step SSO guides for Dex, Keycloak, Microsoft Entra, and OpenShift.
+  </Card>
+  <Card title="Ingress" icon="globe" href="/web-ui/ingress">
+    Expose the Web UI via Ingress or Gateway API with TLS termination.
+  </Card>
+</CardGroup>

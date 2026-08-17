@@ -1,0 +1,244 @@
+---
+title: "Flux Operator CLI Reference and Installation"
+sidebarTitle: "Overview"
+description: "Install the Flux Operator CLI and explore every command group for managing Flux instances, resources, secrets, and AI agent skills."
+---
+
+The Flux Operator CLI (`flux-operator`) is a purpose-built command-line tool for managing Flux Operator resources in Kubernetes clusters. It covers the full lifecycle of Flux instances and resource sets — from offline manifest generation to live cluster reconciliation — and extends into AI agent skill management via OCI artifacts.
+
+## Installation
+
+<Tabs>
+  <Tab title="Homebrew">
+    Install the standalone CLI on macOS or Linux using Homebrew:
+
+    ```shell
+    brew install controlplaneio-fluxcd/tap/flux-operator
+    ```
+  </Tab>
+  <Tab title="Flux Plugin">
+    Install as a plugin for the existing `flux` CLI:
+
+    ```shell
+    flux plugin install operator
+    ```
+
+    Once installed, you can invoke it as `flux operator <command>`.
+  </Tab>
+  <Tab title="Binary Download">
+    Download a pre-built binary for Linux, macOS, or Windows from the
+    [GitHub releases page](https://github.com/controlplaneio-fluxcd/flux-operator/releases).
+
+    ```shell
+    # Example: Linux AMD64
+    curl -sL https://github.com/controlplaneio-fluxcd/flux-operator/releases/latest/download/flux-operator_linux_amd64.tar.gz \
+      | tar xz flux-operator
+    chmod +x flux-operator
+    sudo mv flux-operator /usr/local/bin/
+    ```
+  </Tab>
+  <Tab title="Container Image">
+    The CLI is also distributed as a multi-arch container image (Linux AMD64/ARM64), useful in CI pipelines or Kubernetes Jobs:
+
+    ```shell
+    # GitHub Container Registry
+    docker pull ghcr.io/controlplaneio-fluxcd/flux-operator-cli:latest
+
+    # Quay.io
+    docker pull quay.io/fluxoperatordev/flux-operator-cli:latest
+    ```
+
+    The image bundles additional binaries for convenience:
+
+    | Binary | Purpose |
+    |---|---|
+    | `flux-operator` | Manage Flux instances and resources |
+    | `flux` | Push, pull, and manage OCI artifacts |
+    | `flux-schema` | Validate Kubernetes manifests and generate schemas |
+    | `flux-mirror` | Sync Helm charts and OCI artifacts across registries |
+    | `kubectl` | Kubernetes cluster operations |
+    | `sh` | BusyBox shell for scripts and debugging |
+  </Tab>
+</Tabs>
+
+## Shell Completion
+
+<Tabs>
+  <Tab title="Bash">
+    ```shell
+    echo "source <(flux-operator completion bash)" >> ~/.bash_profile
+    source ~/.bash_profile
+    ```
+  </Tab>
+  <Tab title="Zsh">
+    ```shell
+    echo "source <(flux-operator completion zsh)" >> ~/.zshrc
+    source ~/.zshrc
+    ```
+  </Tab>
+  <Tab title="Fish">
+    ```shell
+    flux-operator completion fish | source
+    # To persist across sessions:
+    flux-operator completion fish > ~/.config/fish/completions/flux-operator.fish
+    ```
+  </Tab>
+  <Tab title="PowerShell">
+    ```shell
+    flux-operator completion powershell | Out-String | Invoke-Expression
+    ```
+  </Tab>
+</Tabs>
+
+## Cluster Access Requirements
+
+<Note>
+  The `build`, `diff`, and `patch` commands run entirely **offline** — they do not require access to a Kubernetes cluster and can be used in any environment, including local development and CI pipelines. All other commands require cluster access and the Flux Operator to be installed.
+</Note>
+
+The CLI reads cluster credentials from `~/.kube/config`, the same as `kubectl`. You can override this with the `KUBECONFIG` environment variable or the `--kubeconfig` flag.
+
+| Command Group | Requires Cluster | Description |
+|---|---|---|
+| `build` | No | Generate Kubernetes manifests offline |
+| `diff` | No | Compare YAML files and produce RFC 6902 patches |
+| `patch` | No | Generate kustomize patches for Flux upgrades |
+| `get` | Yes | Retrieve Flux Operator resource status |
+| `export` | Yes | Export resources in YAML/JSON format |
+| `reconcile` | Yes | Trigger reconciliation |
+| `suspend` | Yes | Pause reconciliation |
+| `resume` | Yes | Resume reconciliation |
+| `delete` | Yes | Delete Flux Operator resources |
+| `wait` | Yes | Wait for resources to become ready |
+| `stats` | Yes | Reconciliation statistics |
+| `trace` | Yes | Trace a K8s object through the GitOps pipeline |
+| `tree` | Yes | Visualize Flux-managed objects |
+| `migrate` | Yes | Clean up managed fields on resources |
+| `create secret` | Yes | Create Kubernetes secrets for Flux |
+| `distro mirror` | Yes | Mirror Flux distribution to a private registry |
+| `skills` | No | Manage AI agent skills as OCI artifacts |
+| `install` | Yes | Bootstrap a cluster with Flux Operator |
+| `uninstall` | Yes | Remove Flux Operator from a cluster |
+| `version` | Optional | Display CLI and operator version |
+
+## Command Groups
+
+<CardGroup cols={2}>
+  <Card title="Build & Patch" icon="hammer" href="/cli/build-diff-patch">
+    Generate Flux manifests and kustomize patches offline with `build`, `diff`, and `patch`.
+  </Card>
+  <Card title="Get & Export" icon="magnifying-glass" href="/cli/get-export">
+    Inspect Flux resources and export reports with `get`, `export`, `stats`, `trace`, and `tree`.
+  </Card>
+  <Card title="Reconcile" icon="rotate" href="/cli/reconcile-suspend-resume">
+    Trigger, suspend, resume, and delete reconciliation with full namespace filtering.
+  </Card>
+  <Card title="Create Secret" icon="key" href="/cli/create-secret">
+    Create typed Kubernetes secrets for Git auth, OCI registries, SOPS, TLS, and web config.
+  </Card>
+  <Card title="Skills" icon="brain" href="/cli/skills">
+    Install, update, publish, and manage AI agent skills distributed as signed OCI artifacts.
+  </Card>
+</CardGroup>
+
+### Build Commands
+
+Generate Kubernetes manifests without cluster access:
+
+- **`flux-operator build instance`** — Renders the full set of Flux Kubernetes manifests from a `FluxInstance` definition.
+- **`flux-operator build rset`** — Renders manifests from a `ResourceSet` definition, printing step-ordered output with `# step: <name>` comment separators.
+
+### Diff Commands
+
+Compare YAML and generate patches:
+
+- **`flux-operator diff yaml <source> <target>`** — Compares two YAML files (local paths or remote URLs) and produces an RFC 6902 JSON patch. Ignores metadata and status fields to focus on semantic content.
+
+### Patch Commands
+
+Generate upgrade patches:
+
+- **`flux-operator patch instance`** — Fetches CRD schemas for the current and target controller versions, computes diffs, and appends kustomize patches to a `FluxInstance` manifest in-place.
+
+### Get Commands
+
+Retrieve resource status from the cluster:
+
+- **`flux-operator get instance`** — FluxInstance status.
+- **`flux-operator get rset`** — ResourceSet status.
+- **`flux-operator get rsip`** — ResourceSetInputProvider status.
+- **`flux-operator get all`** — All Flux resources with filtering by kind, namespace, and ready status.
+
+### Export Commands
+
+Export resources for backup or inspection:
+
+- **`flux-operator export report`** — Exports the `FluxReport` resource with distribution and version info.
+- **`flux-operator export resource <kind>/<name>`** — Exports any Flux resource in YAML or JSON.
+
+### Reconcile / Suspend / Resume Commands
+
+Control reconciliation state:
+
+- **`flux-operator reconcile instance|rset|rsip|resource|all`** — Trigger an immediate reconciliation.
+- **`flux-operator suspend instance|rset|rsip|resource`** — Pause reconciliation.
+- **`flux-operator resume instance|rset|rsip|resource`** — Resume reconciliation, optionally waiting for readiness.
+
+### Delete Commands
+
+Remove resources from the cluster:
+
+- **`flux-operator delete instance|rset|rsip`** — Deletes the named resource; by default waits for deletion to complete.
+
+### Wait Commands
+
+Block until a resource reaches ready state:
+
+- **`flux-operator wait instance|rset|rsip`** — Poll with a configurable timeout (default `1m`).
+
+### Stats, Trace & Tree Commands
+
+Visibility into the GitOps pipeline:
+
+- **`flux-operator stats`** — Reconciliation statistics and cumulative storage usage per source type.
+- **`flux-operator trace <kind>/<name>`** — Traces a Kubernetes object to its Flux reconciler and source.
+- **`flux-operator tree rset|ks|hr`** — Tree visualization of Flux-managed objects.
+
+### Migrate Commands
+
+Clean up managed fields:
+
+- **`flux-operator migrate owner <kind>/<name>`** — Strips stale managed field entries left by previous Flux appliers.
+- **`flux-operator migrate resources`** — Migrates managed fields to a new API version after a CRD storage version change.
+
+### Create Secret Commands
+
+Create Flux-compatible secrets:
+
+- **`flux-operator create secret basic-auth|githubapp|proxy|registry|sops|ssh|tls|web-config|webauth`** — Creates typed secrets in the cluster or exports them in YAML.
+
+### Distro Mirror Command
+
+Mirror the Flux distribution to a private registry:
+
+- **`flux-operator distro mirror <destination>`** — Mirrors controller images, the operator image, Helm charts, and more to an air-gapped or private registry.
+
+### Skills Commands
+
+Manage AI agent skills as OCI artifacts:
+
+- **`flux-operator skills install|list|update|uninstall|publish`** — Full lifecycle management of agent skills with Sigstore signature verification.
+
+### Install / Uninstall Commands
+
+Bootstrap and teardown:
+
+- **`flux-operator install`** — Bootstraps a cluster with the Flux Operator and a Flux instance.
+- **`flux-operator uninstall`** — Safely removes Flux Operator, controllers, CRDs, and the namespace.
+
+### Version Command
+
+```shell
+flux-operator version          # Show CLI and server version
+flux-operator version --client # Show CLI version only (no cluster required)
+```

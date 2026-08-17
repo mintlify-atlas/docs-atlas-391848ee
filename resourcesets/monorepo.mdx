@@ -1,0 +1,282 @@
+---
+title: "Deploy Monorepo Services with Auto-Generated Pipelines"
+sidebarTitle: "Monorepo"
+description: "Use ArtifactGenerator and ExternalArtifact with ResourceSetInputProvider to auto-generate Flux Kustomizations for every app directory in a monorepo."
+---
+
+Managing hundreds of applications in a monorepo with hand-written Flux `Kustomization` manifests creates constant maintenance overhead — every app added, renamed, or retired requires touching the Flux configuration. The Flux Operator solves this by auto-generating the full delivery pipeline from the monorepo directory structure itself. Adding a directory deploys the app; removing it tears the deployment down. No GitOps config changes required.
+
+## How It Works
+
+The pipeline is composed of four Flux and Flux Operator resources that work together in an event-driven chain:
+
+1. A Flux **`GitRepository`** pulls the monorepo contents into the cluster as an artifact.
+2. A Flux **`ArtifactGenerator`** scans the artifact for directories matching a path pattern (e.g., `apps/{app}/envs/{env}`) and generates one `ExternalArtifact` resource per matched directory, labeled with the values captured from the path.
+3. A Flux Operator **`ResourceSetInputProvider`** of type `ExternalArtifact` discovers the generated artifacts using label selectors and exports an input set per artifact — including its name, namespace, revision, and all labels.
+4. A Flux Operator **`ResourceSet`** consumes those inputs and renders a Flux `Kustomization` per input set, applying the app manifests from the artifact onto the cluster.
+
+<Note>
+  This pipeline requires a `FluxInstance` running **Flux v2.9.0 or later** with the `source-watcher` component enabled. The `source-watcher` component provides the `ArtifactGenerator` API.
+</Note>
+
+## Prerequisites
+
+Enable the `source-watcher` component in your `FluxInstance`:
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: FluxInstance
+metadata:
+  name: flux
+  namespace: flux-system
+spec:
+  distribution:
+    version: "2.9.x"
+    registry: "ghcr.io/fluxcd"
+  components:
+    - source-controller
+    - kustomize-controller
+    - helm-controller
+    - notification-controller
+    - source-watcher
+```
+
+## Monorepo Structure
+
+The workflow is demonstrated with a monorepo where each application has a Kustomize base and environment-specific overlays:
+
+```text
+platform-monorepo/
+└── apps/
+    ├── auth/
+    │   ├── base/
+    │   │   ├── kustomization.yaml
+    │   │   └── deployment.yaml
+    │   └── envs/
+    │       ├── dev/
+    │       │   └── kustomization.yaml
+    │       └── prod/
+    │           └── kustomization.yaml
+    └── payments/
+        ├── base/
+        │   ├── kustomization.yaml
+        │   └── deployment.yaml
+        └── envs/
+            ├── dev/
+            │   └── kustomization.yaml
+            └── prod/
+                └── kustomization.yaml
+```
+
+Each environment overlay references its app base with a relative path:
+
+```yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+patches:
+  - target:
+      kind: Deployment
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 2
+```
+
+## GitOps Workflow
+
+<Steps>
+  <Step title="Configure the Git source">
+    Create a Flux `GitRepository` that pulls the monorepo contents into the cluster:
+
+    ```yaml
+    apiVersion: source.toolkit.fluxcd.io/v1
+    kind: GitRepository
+    metadata:
+      name: platform-monorepo
+      namespace: apps
+    spec:
+      interval: 5m
+      url: https://github.com/org/platform-monorepo
+      ref:
+        branch: main
+    ```
+
+    For private repositories, add a `spec.secretRef` pointing to a Secret with credentials. On production clusters, consider tracking semver tags (`spec.ref.semver: ">=1.0.0"`) so that changes only roll out when a new version is tagged in Git.
+  </Step>
+
+  <Step title="Generate an artifact per app environment">
+    Create an `ArtifactGenerator` that scans the artifact for directories matching the `apps/{app}/envs/{env}` pattern:
+
+    ```yaml
+    apiVersion: source.extensions.fluxcd.io/v1beta1
+    kind: ArtifactGenerator
+    metadata:
+      name: platform-apps
+      namespace: apps
+    spec:
+      sources:
+        - alias: monorepo
+          kind: GitRepository
+          name: platform-monorepo
+      commonMetadata:
+        labels:
+          team: platform
+      pathPattern: "@monorepo/apps/{app}/envs/{env}"
+      artifacts:
+        - name: "{app}-{env}"
+          copy:
+            - from: "@monorepo/apps/{app}/base/**"
+              to: "@artifact/base/"
+            - from: "@monorepo/apps/{app}/envs/{env}/**"
+              to: "@artifact/envs/{env}/"
+    ```
+
+    The `{app}` and `{env}` named captures act as wildcards and their values are set as labels on the generated `ExternalArtifact` resources. The `copy` operations replicate the app base alongside the environment overlay inside the artifact, so that the relative path reference from the overlay to the base resolves correctly.
+
+    For the example monorepo, the generator produces four artifacts: `auth-dev`, `auth-prod`, `payments-dev`, and `payments-prod`. Each artifact looks like:
+
+    ```yaml
+    apiVersion: source.toolkit.fluxcd.io/v1
+    kind: ExternalArtifact
+    metadata:
+      name: auth-dev
+      namespace: apps
+      labels:
+        app: auth                # from the {app} path capture
+        env: dev                 # from the {env} path capture
+        team: platform           # from commonMetadata
+        app.kubernetes.io/managed-by: source-watcher
+    status:
+      artifact:
+        revision: latest@sha256:6e7dcb5a0e14be6c3ee3ba00c0be00921ba1f6a72b9b6e26aab3d0e29e9c313e
+        url: http://source-watcher.flux-system.svc.cluster.local./externalartifact/apps/auth-dev/3120514532.tar.gz
+    ```
+
+    Each artifact's revision changes only when the contents of its specific directories change in Git, so only affected Kustomizations reconcile on each commit.
+  </Step>
+
+  <Step title="Discover the generated artifacts">
+    Create a `ResourceSetInputProvider` of type `ExternalArtifact` that discovers the artifacts by their labels. On a dev cluster, select only the `env: dev` artifacts:
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: ResourceSetInputProvider
+    metadata:
+      name: platform-apps
+      namespace: apps
+    spec:
+      type: ExternalArtifact
+      selectors:
+        - matchLabels:
+            team: platform
+            env: dev
+    ```
+
+    The provider exports an input set for each discovered artifact. Besides the built-in fields, all labels on the artifact become template variables:
+
+    ```yaml
+    status:
+      exportedInputs:
+        - id: "592053506"
+          name: auth-dev
+          namespace: apps
+          revision: latest@sha256:6e7dcb5a0e14be6c3ee3ba00c0be00921ba1f6a72b9b6e26aab3d0e29e9c313e
+          app: auth
+          env: dev
+          team: platform
+        - id: "1023018689"
+          name: payments-dev
+          namespace: apps
+          revision: latest@sha256:9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b
+          app: payments
+          env: dev
+          team: platform
+    ```
+
+    <Note>
+      By default the provider exports at most 100 input sets. If your monorepo contains more matching directories, increase the limit with `spec.filter.limit`.
+    </Note>
+  </Step>
+
+  <Step title="Configure app deployments">
+    Create a `ResourceSet` that generates a Flux `Kustomization` for each input set:
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: ResourceSet
+    metadata:
+      name: platform-apps
+      namespace: apps
+    spec:
+      inputsFrom:
+        - kind: ResourceSetInputProvider
+          name: platform-apps
+      resources:
+        - apiVersion: kustomize.toolkit.fluxcd.io/v1
+          kind: Kustomization
+          metadata:
+            name: << inputs.app >>
+            namespace: << inputs.provider.namespace >>
+          spec:
+            interval: 30m
+            retryInterval: 5m
+            timeout: 5m
+            prune: true
+            wait: true
+            sourceRef:
+              kind: ExternalArtifact
+              name: << inputs.name >>
+            path: ./envs/<< inputs.env >>
+            targetNamespace: << inputs.provider.namespace >>
+    ```
+
+    Each generated `Kustomization` points to its `ExternalArtifact` and builds the environment overlay from the artifact contents. For the example monorepo on the dev cluster, this produces `auth` and `payments` Kustomizations pointing to `auth-dev` and `payments-dev`.
+  </Step>
+</Steps>
+
+## Day-2 Operations
+
+| Action | What Happens |
+|---|---|
+| **Add an app or environment** | New directory pushed to monorepo → `ExternalArtifact` generated → `ResourceSet` creates a new `Kustomization` → app is deployed |
+| **Change app manifests** | Directory contents change → artifact revision updated → only the affected `Kustomization` reconciles |
+| **Remove an app or environment** | Directory deleted → `ExternalArtifact` removed → input disappears → `ResourceSet` deletes the `Kustomization` → app workloads are pruned |
+
+## Environment Segregation
+
+The same `GitRepository`, `ArtifactGenerator`, and `ResourceSet` definitions can be applied identically to all clusters. Only the `env` value in the `ResourceSetInputProvider` selector differs between clusters. To avoid maintaining per-cluster variants of the provider definition, use Flux [variable substitution](https://fluxcd.io/flux/components/kustomize/kustomizations/#post-build-variable-substitution) to inject the `env` value from a per-cluster `ConfigMap`.
+
+On production clusters, you can gate when new artifact revisions are rolled out by attaching deployment windows to the `ResourceSetInputProvider`. See the [Time-Based Delivery](/resourcesets/time-based-delivery) guide for details.
+
+## Multi-Tenancy Considerations
+
+By default, the Flux Operator discovers `ExternalArtifact` resources using its own service account, which has cluster-wide read access. On multi-tenant clusters, restrict discovery to a tenant service account by setting `spec.serviceAccountName` on the `ResourceSetInputProvider`. When the operator is started with `--default-service-account`, impersonation is enforced for all providers.
+
+<Warning>
+  When using a selector with `namespace: "*"` (discovery across all namespaces), the impersonated service account must have cluster-wide `list` permissions on `ExternalArtifact` resources, or reconciliation will fail with a forbidden error.
+</Warning>
+
+## CLI Commands
+
+```shell
+# View the status of the ResourceSet, input provider, and generated Kustomizations
+flux-operator -n apps get all
+
+# Inspect the inputs exported by the provider
+kubectl -n apps get rsip platform-apps -o yaml
+
+# Suspend pipeline generation
+flux-operator -n apps suspend rset platform-apps
+
+# Resume pipeline generation
+flux-operator -n apps resume rset platform-apps
+
+# Trigger an immediate discovery of ExternalArtifact resources
+flux-operator -n apps reconcile rsip platform-apps
+
+# Build the ResourceSet locally with mock inputs
+flux-operator build rset -f platform-apps-resourceset.yaml \
+  --inputs-from-provider static-inputs.yaml
+```

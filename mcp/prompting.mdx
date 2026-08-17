@@ -1,0 +1,211 @@
+---
+title: "Prompting Guide for AI-Assisted GitOps with Flux"
+sidebarTitle: "Prompting"
+description: "Set up AI instructions for Claude, Cursor, Windsurf, and GitHub Copilot, and learn effective prompting strategies for Flux GitOps operations."
+---
+
+Providing your AI assistant with the right context and instructions is what separates a generic chat experience from a genuinely useful GitOps co-pilot. This guide explains how to configure AI rules for each supported client, install Agent Skills for deeper expertise, and craft prompts that get accurate, actionable results.
+
+## AI Instructions
+
+The Flux project maintains a curated set of [AI instructions](https://raw.githubusercontent.com/controlplaneio-fluxcd/flux-operator/refs/heads/main/docs/mcp/instructions.md) (~1400 tokens) that teach your assistant:
+
+- The Flux custom resource model (FluxInstance, Kustomization, HelmRelease, OCIRepository, and more)
+- Correct tool-calling workflows for HelmRelease and Kustomization troubleshooting
+- How to avoid assumptions about `apiVersion` and always look up the correct value
+- Safe defaults: don't modify Flux-managed resources unless explicitly asked
+
+Copy the rules from the instructions file and place them in the appropriate location for your assistant:
+
+<Tabs>
+  <Tab title="Claude Desktop">
+    Open Claude Desktop and navigate to your **Project**. In the **Project Instructions** panel, paste the full contents of `instructions.md`.
+
+    This applies the rules to every conversation in that project. Consider enhancing the instructions with details specific to your environment — your Kubernetes distribution, cloud provider, secret management solution, and the types of applications deployed.
+  </Tab>
+  <Tab title="Cursor">
+    Create or edit the rules file in your Git repository:
+
+    ```
+    .cursor/rules/flux.mdc
+    ```
+
+    Paste the instructions content into this file. Cursor loads `.cursor/rules` files automatically for every workspace session, giving the AI persistent context about your GitOps setup.
+  </Tab>
+  <Tab title="Windsurf">
+    Create or edit the rules file in your Git repository:
+
+    ```
+    .windsurf/rules/flux.md
+    ```
+
+    Paste the instructions content into this file. Windsurf reads `.windsurf/rules` to provide the AI with persistent, repository-scoped instructions.
+  </Tab>
+  <Tab title="GitHub Copilot">
+    Add the instructions to your repository's Copilot instructions file:
+
+    ```
+    .github/copilot-instructions.md
+    ```
+
+    Paste the contents of `instructions.md` into this file. GitHub Copilot reads this file in Agent mode to guide its behavior across the repository.
+
+    Ensure **Agent mode** is enabled in VS Code settings (`github.copilot.chat.agent.enabled: true`).
+  </Tab>
+</Tabs>
+
+<Tip>
+  Enhance the base instructions with context specific to your clusters. For example, add which Kubernetes distribution you use, your cloud provider, how secrets are managed (Vault, External Secrets, SOPS), and which namespaces contain production workloads.
+</Tip>
+
+## Agent Skills
+
+For AI agents that support the [Agent Skills Open Standard](https://agentskills.io/specification), the Flux project maintains official [GitOps Agent Skills](https://github.com/fluxcd/agent-skills) that give coding agents deep expertise in Flux CD, Kubernetes, and GitOps best practices.
+
+The skill relevant to the MCP Server is **`gitops-cluster-debug`**. This skill:
+
+- Follows dedicated workflows for troubleshooting HelmRelease, Kustomization, and ResourceSet resources
+- Produces root cause analysis reports with a dependency chain
+- Generates prioritized remediation steps
+
+Install the skill from your GitOps repository root using the Flux Operator CLI:
+
+```shell
+flux-operator skills install ghcr.io/fluxcd/agent-skills --agent claude-code
+```
+
+The skills work across compatible agents including **Claude Code**, **Codex**, **Gemini**, and **GitHub Copilot**. For other agents and manual installation methods, refer to the [agent-skills README](https://github.com/fluxcd/agent-skills#install).
+
+## Repository Context
+
+When using an AI chat inside your IDE (Cursor, Windsurf, VS Code), the assistant can read your local Kubernetes and Flux manifests alongside live cluster state. This enables it to compare desired state in Git against current cluster state — a powerful combination for drift detection and deployment analysis.
+
+When using Claude Desktop, you can install the [filesystem MCP server](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem) to grant the assistant access to your local Kubernetes manifests.
+
+You can also add the Flux Operator documentation to Claude project knowledge by pointing to the `docs/operator` folder in the `https://github.com/controlplaneio-fluxcd/distribution` repository. This ensures the latest Flux Operator API specifications and guides are available to the model.
+
+## Prompting Strategies
+
+For the best results with the Flux MCP Server tools:
+
+- **Start broad, then narrow** — Begin with general queries about your Flux installation before drilling into specific resources
+- **Include context** — Mention the namespace, cluster name, and relevant resource names in your requests
+- **Chain operations** — For complex workflows, ask the AI to perform a sequence of related steps
+- **Verify changes** — After any modification, ask the AI to check and report on the new state
+- **Invoke documentation** — When in doubt about Flux API behavior, explicitly ask the assistant to search the Flux docs
+
+## Example Prompts
+
+### Reporting and Troubleshooting
+
+```
+Analyze the Flux installation in my current cluster and report the status of all components.
+```
+
+```
+List the clusters in my kubeconfig and compare the Flux instances across them.
+```
+
+```
+Are there any reconciliation errors in the Flux-managed resources?
+```
+
+```
+Are the Flux kustomizations and Helm releases configured correctly?
+```
+
+```
+Based on Flux events, what deployments have been updated today?
+```
+
+```
+Draw a diagram of the Flux dependency flow in the cluster.
+```
+
+```
+What is the Git source and revision of the Flux OCI repositories?
+```
+
+```
+Which Kubernetes deployments are managed by Flux in the current cluster?
+```
+
+```
+Which images are deployed by Flux in the monitoring namespace?
+```
+
+```
+Perform a root cause analysis of the last failed deployment in the frontend namespace.
+```
+
+### Actions
+
+```
+Reconcile the flux-system kustomization with its source in the current cluster.
+```
+
+```
+Reconcile all the Flux Kustomizations from flux-system namespace in the depends-on order, then verify their status.
+```
+
+```
+Suspend all failing Helm releases in the test namespace, then delete them from the cluster.
+```
+
+```
+Search for all the suspended Flux Kustomizations in the cluster and resume them.
+```
+
+```
+Generate a namespace called test and apply it on my current cluster.
+```
+
+```
+Copy the flux service account and its RBAC from the frontend namespace into test (remove the fluxcd labels).
+```
+
+```
+Delete the test namespace from my current cluster.
+```
+
+### Learning
+
+```
+How to configure mutual TLS for Git? Answer using the latest Flux docs.
+```
+
+```
+What is the role of the interval setting in a Flux Kustomization? Search the latest docs.
+```
+
+```
+How to trigger a Flux reconciliation with a webhook? Search the latest docs.
+```
+
+## Predefined Prompts
+
+The Flux MCP Server includes predefined prompts that chain multiple tools together to perform complex diagnostic workflows automatically.
+
+### `debug_flux_kustomization`
+
+Troubleshoots a Flux Kustomization and provides a root cause analysis for any issues found.
+
+| Parameter | Required | Description |
+|---|---|---|
+| `name` | Yes | The name of the Kustomization |
+| `namespace` | Yes | The namespace of the Kustomization |
+| `cluster` | No | The cluster context to use |
+
+The prompt follows the full Kustomization analysis workflow: checking the Flux instance, fetching the resource spec, status, inventory and events, tracing the source, inspecting managed resources, and analyzing logs before generating a root cause report.
+
+### `debug_flux_helmrelease`
+
+Troubleshoots a Flux HelmRelease and provides a root cause analysis for any issues found.
+
+| Parameter | Required | Description |
+|---|---|---|
+| `name` | Yes | The name of the HelmRelease |
+| `namespace` | Yes | The namespace of the HelmRelease |
+| `cluster` | No | The cluster context to use |
+
+The prompt follows the full HelmRelease analysis workflow: checking the Helm controller, fetching the release spec, status, inventory and events, tracing the chart source, inspecting `valuesFrom` ConfigMaps and Secrets, and analyzing managed resource logs before generating a root cause report.

@@ -1,0 +1,173 @@
+---
+title: "Expose the Flux Web UI via Ingress or Gateway API"
+sidebarTitle: "Ingress"
+description: "Expose the Flux Web UI externally using Kubernetes Ingress or Gateway API HTTPRoute, with TLS termination via cert-manager on port 9080."
+---
+
+The Flux Operator serves the Web UI on port **9080** with the port name `http-web`. This port is exposed inside the cluster by the `flux-operator` Kubernetes Service of type `ClusterIP`. To make the dashboard reachable outside the cluster — for example from a developer's browser or a company portal — you configure an Ingress or Gateway API resource that routes external HTTPS traffic to that service. It is strongly recommended to pair external exposure with TLS termination and [Single Sign-On](/web-ui/sso).
+
+## Helm-Based Ingress
+
+If you are managing the Flux Operator with its Helm chart, create an Ingress resource by setting values under `web.ingress`. This is the simplest approach because the chart templates the Ingress object and keeps it in sync with your Helm release:
+
+```yaml
+web:
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+    hosts:
+      - host: flux.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - hosts:
+          - flux.example.com
+        secretName: flux-web-tls
+```
+
+Replace `nginx` with your Ingress controller class name and `flux.example.com` with your actual domain. The `cert-manager.io/cluster-issuer` annotation instructs cert-manager to provision a certificate automatically. Configure an HTTP-to-HTTPS redirect in your Ingress controller to prevent unencrypted access.
+
+## Raw Ingress Manifest
+
+When using a deployment method other than the Flux Operator Helm chart — for example a standalone Web UI deployment or a custom GitOps-managed manifest — create the Ingress resource directly:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: flux-web
+  namespace: flux-system
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: "nginx"
+  rules:
+    - host: "flux.example.com"
+      http:
+        paths:
+          - backend:
+              service:
+                name: flux-operator
+                port:
+                  name: http-web
+            path: /
+            pathType: Prefix
+  tls:
+    - hosts:
+        - "flux.example.com"
+      secretName: flux-web-tls
+```
+
+Key points:
+
+- The `service.name` must be `flux-operator` (or `flux-web` when using a [standalone deployment](/web-ui/overview#standalone-deployment)).
+- The `port.name` is `http-web`; you can also use `port.number: 9080`.
+- The `secretName` under `tls` is where cert-manager stores the provisioned certificate.
+
+<Note>
+  Replace `nginx` with your Ingress class name and `flux.example.com` with your actual domain name. Configure your Ingress controller to redirect HTTP requests to HTTPS.
+</Note>
+
+## Gateway API
+
+If your cluster uses the [Gateway API](https://gateway-api.sigs.k8s.io/) instead of the classic Ingress API, create a `Gateway` with TLS termination and a corresponding `HTTPRoute`:
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: flux-web
+  namespace: flux-system
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: internet-gateway
+      namespace: gateway-namespace
+  hostnames:
+    - "flux.example.com"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: flux-operator
+          namespace: flux-system
+          port: 9080
+```
+
+Update `parentRefs` to match your existing `Gateway` name and namespace. The `hostname` must match your domain. Port `9080` refers directly to the numeric port on the `flux-operator` Service.
+
+<Tip>
+  For wildcard TLS certificates, provision a certificate Secret in the `flux-system` namespace and reference it in your `Gateway` listener's `certificateRefs`. The `HTTPRoute` itself does not need TLS configuration when termination is handled at the `Gateway`.
+</Tip>
+
+## Complete TLS Example with cert-manager
+
+The following ResourceSet provisions an Ingress with cert-manager TLS for the Flux Operator Helm release, combining the `web.ingress` Helm values with the Web UI's OAuth2 configuration:
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSet
+metadata:
+  name: flux-operator
+  namespace: flux-system
+spec:
+  inputs:
+    - domain: "example.com"
+      ingressClass: "nginx"
+      clusterIssuer: "letsencrypt-prod"
+  resources:
+    - apiVersion: helm.toolkit.fluxcd.io/v2
+      kind: HelmRelease
+      metadata:
+        name: << inputs.provider.name >>
+        namespace: << inputs.provider.namespace >>
+      spec:
+        interval: 30m
+        releaseName: << inputs.provider.name >>
+        serviceAccountName: << inputs.provider.name >>
+        chartRef:
+          kind: OCIRepository
+          name: << inputs.provider.name >>
+        values:
+          web:
+            config:
+              baseURL: "https://flux.<< inputs.domain >>"
+              authentication:
+                type: OAuth2
+                oauth2:
+                  provider: OIDC
+                  issuerURL: "https://dex.<< inputs.domain >>"
+            ingress:
+              enabled: true
+              className: << inputs.ingressClass >>
+              annotations:
+                cert-manager.io/cluster-issuer: << inputs.clusterIssuer >>
+              hosts:
+                - host: "flux.<< inputs.domain >>"
+                  paths:
+                    - path: /
+                      pathType: Prefix
+              tls:
+                - hosts:
+                    - "flux.<< inputs.domain >>"
+                  secretName: flux-web-tls
+        valuesFrom:
+          - kind: Secret
+            name: flux-web-client
+            valuesKey: client-id
+            targetPath: web.config.authentication.oauth2.clientID
+          - kind: Secret
+            name: flux-web-client
+            valuesKey: client-secret
+            targetPath: web.config.authentication.oauth2.clientSecret
+```
+
+<Warning>
+  Always secure the Web UI with TLS before exposing it to the internet. Unencrypted HTTP traffic exposes OAuth2 tokens and session cookies to interception.
+</Warning>

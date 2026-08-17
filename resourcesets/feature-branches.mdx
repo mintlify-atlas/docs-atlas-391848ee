@@ -1,0 +1,292 @@
+---
+title: "Preview Environments for Feature Branches"
+sidebarTitle: "Feature Branches"
+description: "Automate preview environment provisioning for feature branches on GitHub, GitLab, Azure DevOps, and Gitea using ResourceSetInputProvider."
+---
+
+The Flux Operator ResourceSet API can automatically provision and tear down preview environments for every feature branch in your repository. When a developer pushes a new branch matching a configured pattern, the operator installs a Helm release for it; when the branch is deleted (e.g., after the PR is merged), the release is automatically uninstalled — no manual cleanup required.
+
+## Supported Git Providers
+
+Feature branch preview environments are powered by the `ResourceSetInputProvider` and support the following `spec.type` values:
+
+| Provider Type | Git Service |
+|---|---|
+| `GitHubBranch` | GitHub.com and GitHub Enterprise |
+| `GitLabBranch` | GitLab.com and self-hosted GitLab |
+| `AzureDevOpsBranch` | Azure DevOps Repos |
+| `GiteaBranch` | Gitea and Forgejo |
+
+## Development Workflow
+
+<Steps>
+  <Step title="Developer creates a feature branch">
+    A branch following a naming convention (e.g., `feat/` prefix) is pushed to the app repository.
+  </Step>
+  <Step title="CI builds and tags the image">
+    The CI pipeline builds and pushes the container image tagged with the Git commit SHA.
+  </Step>
+  <Step title="Flux Operator scans for branches">
+    The `ResourceSetInputProvider` running in the preview cluster polls the repository and discovers branches matching the configured filter pattern.
+  </Step>
+  <Step title="Helm release is installed">
+    The `ResourceSet` renders a `GitRepository` and `HelmRelease` for each matching branch and applies them to the cluster.
+  </Step>
+  <Step title="Developers iterate">
+    Each commit to the branch updates `inputs.sha`, triggering a Helm release upgrade in the cluster. The preview URL remains stable.
+  </Step>
+  <Step title="Notifications are sent">
+    Flux Alerts post deployment status to Slack and commit status checks on the Git provider.
+  </Step>
+  <Step title="Branch is deleted">
+    When the branch is deleted, its inputs disappear from the provider, and the `ResourceSet` garbage-collects the `GitRepository` and `HelmRelease`.
+  </Step>
+</Steps>
+
+## GitOps Workflow
+
+### Preview Namespace
+
+Create a dedicated namespace and a scoped service account for Flux:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: app-preview
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flux
+  namespace: app-preview
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flux
+  namespace: app-preview
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: admin
+subjects:
+  - kind: ServiceAccount
+    name: flux
+    namespace: app-preview
+```
+
+### Authentication
+
+Create a Kubernetes Secret in the `app-preview` namespace with credentials granting read access to the repository:
+
+```shell
+echo $GITHUB_TOKEN | flux-operator -n app-preview create secret basic-auth git-auth \
+  --username=flux \
+  --password-stdin
+```
+
+### ResourceSetInputProvider
+
+Create the `ResourceSetInputProvider` to scan the repository for matching branches. The `reconcileEvery` annotation controls how often the operator polls the Git provider:
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSetInputProvider
+metadata:
+  name: app-branches
+  namespace: app-preview
+  annotations:
+    fluxcd.controlplane.io/reconcileEvery: "10m"
+spec:
+  type: GitHubBranch
+  url: https://github.com/org/app
+  secretRef:
+    name: git-auth
+  filter:
+    includeBranch: "feat/.*"
+  defaultValues:
+    chart: "charts/app"
+```
+
+Change `spec.type` to `GitLabBranch`, `AzureDevOpsBranch`, or `GiteaBranch` to match your Git provider.
+
+#### Exported Inputs
+
+The branch providers export the following inputs for use in the `ResourceSet` template:
+
+| Input | Description |
+|---|---|
+| `inputs.id` | Short identifier derived from the branch name, safe for Kubernetes resource names |
+| `inputs.sha` | Latest commit SHA on the branch |
+| `inputs.branch` | Full branch name |
+
+Any keys defined in `spec.defaultValues` (such as `chart` above) are also available as inputs.
+
+### Webhook Receiver
+
+Optionally create a Flux `Receiver` to trigger immediate reconciliation when a branch event occurs, instead of waiting for the next polling interval:
+
+```yaml
+apiVersion: notification.toolkit.fluxcd.io/v1
+kind: Receiver
+metadata:
+  name: git-receiver
+  namespace: app-preview
+spec:
+  type: github
+  secretRef:
+    name: receiver-token
+  resources:
+    - apiVersion: fluxcd.controlplane.io/v1
+      kind: ResourceSetInputProvider
+      name: app-branches
+```
+
+Set `spec.type` to `gitlab`, `azuredevops`, or `gitea` to match your provider.
+
+### ResourceSet Template
+
+Create the `ResourceSet` that generates a `GitRepository` and `HelmRelease` for each matching branch:
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSet
+metadata:
+  name: app
+  namespace: app-preview
+spec:
+  serviceAccountName: flux
+  inputsFrom:
+    - apiVersion: fluxcd.controlplane.io/v1
+      kind: ResourceSetInputProvider
+      name: app-branches
+  resources:
+    - apiVersion: source.toolkit.fluxcd.io/v1
+      kind: GitRepository
+      metadata:
+        name: app-<< inputs.id >>
+        namespace: app-preview
+      spec:
+        interval: 1h
+        url: https://github.com/org/app
+        ref:
+          commit: << inputs.sha >>
+        secretRef:
+          name: git-auth
+    - apiVersion: helm.toolkit.fluxcd.io/v2
+      kind: HelmRelease
+      metadata:
+        name: app-<< inputs.id >>
+        namespace: app-preview
+        annotations:
+          event.toolkit.fluxcd.io/commit: << inputs.sha | quote >>
+          event.toolkit.fluxcd.io/preview-url: "https://app-<< inputs.id >>.example.com"
+          event.toolkit.fluxcd.io/branch: << inputs.branch | quote >>
+      spec:
+        serviceAccountName: flux
+        interval: 10m
+        releaseName: app-<< inputs.id >>
+        chart:
+          spec:
+            chart: << inputs.chart >>
+            reconcileStrategy: Revision
+            sourceRef:
+              kind: GitRepository
+              name: app-<< inputs.id >>
+        values:
+          image:
+            tag: << inputs.sha >>
+          ingress:
+            hosts:
+              - host: app-<< inputs.id >>.example.com
+```
+
+The `GitRepository` is pinned to a specific commit SHA using `spec.ref.commit`, so the preview environment only updates when the provider exports a new SHA — not on every Flux sync cycle. The `HelmRelease` uses the same SHA as the container image tag.
+
+### Validate Templates Locally
+
+Use the Flux Operator CLI to build and verify the template before pushing to Git:
+
+```shell
+flux-operator build resourceset -f app-resourceset.yaml \
+  --inputs-from test-inputs.yaml
+```
+
+A `test-inputs.yaml` with mock branch data:
+
+```yaml
+- branch: feat/test
+  id: "123456"
+  sha: bf5d6e01cf802734853f6f3417b237e3ad0ba35d
+  chart: "charts/app"
+```
+
+## Notifications
+
+### Slack Alerts
+
+```yaml
+---
+apiVersion: notification.toolkit.fluxcd.io/v1beta3
+kind: Provider
+metadata:
+  name: slack-bot
+  namespace: app-preview
+spec:
+  type: slack
+  channel: general
+  address: https://slack.com/api/chat.postMessage
+  secretRef:
+    name: slack-bot-token
+---
+apiVersion: notification.toolkit.fluxcd.io/v1beta3
+kind: Alert
+metadata:
+  name: slack
+  namespace: app-preview
+spec:
+  providerRef:
+    name: slack-bot
+  eventSources:
+    - kind: GitRepository
+      name: '*'
+    - kind: HelmRelease
+      name: '*'
+  eventMetadata:
+    cluster: "preview-cluster-1"
+    region: "us-east-1"
+```
+
+### Commit Status Reporting
+
+Post deployment status back to the Git provider as commit checks. The `commit` annotation on the `HelmRelease` (set in the ResourceSet template above) is required by the Flux commit status provider:
+
+```yaml
+---
+apiVersion: notification.toolkit.fluxcd.io/v1beta3
+kind: Provider
+metadata:
+  name: commit-status
+  namespace: app-preview
+spec:
+  type: github
+  address: https://github.com/org/app
+  secretRef:
+    name: git-auth
+---
+apiVersion: notification.toolkit.fluxcd.io/v1beta3
+kind: Alert
+metadata:
+  name: commit-status
+  namespace: app-preview
+spec:
+  providerRef:
+    name: commit-status
+  eventSeverity: info
+  eventSources:
+    - kind: HelmRelease
+      name: '*'
+```
+
+Set `spec.type` to `gitlab`, `azuredevops`, or `gitea` to match your provider. Every time a new commit is pushed to the branch, the Flux Operator upgrades the Helm release and updates the commit status.

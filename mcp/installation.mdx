@@ -1,0 +1,295 @@
+---
+title: "Install the Flux MCP Server for AI Assistants"
+sidebarTitle: "Installation"
+description: "Install the Flux MCP Server via Homebrew, binary download, or source build, and configure it with Claude, Cursor, Windsurf, or GitHub Copilot."
+---
+
+The Flux MCP Server is a single binary that runs alongside your AI assistant, providing it with a structured interface to your Kubernetes clusters. This guide covers every installation method and shows you how to wire the server into each supported AI client.
+
+## Prerequisites
+
+Before installing the Flux MCP Server, ensure you have:
+
+- A Kubernetes cluster with Flux Operator installed
+- A valid kubeconfig file with access to the target clusters
+- Appropriate permissions to view Flux resources (verify with `kubectl get fluxinstance -A`)
+
+## Installation Methods
+
+<Tabs>
+  <Tab title="Homebrew">
+    The fastest way to install on macOS or Linux:
+
+    ```shell
+    brew install controlplaneio-fluxcd/tap/flux-operator-mcp
+    ```
+
+    Homebrew handles PATH configuration automatically. Verify the installation with:
+
+    ```shell
+    flux-operator-mcp --version
+    ```
+  </Tab>
+  <Tab title="Binary Download">
+    Pre-built AMD64 and ARM64 binaries are available for Linux, macOS, and Windows on the
+    [GitHub releases page](https://github.com/controlplaneio-fluxcd/flux-operator/releases).
+
+    Download the archive for your platform and architecture, unpack it, and place the
+    `flux-operator-mcp` binary in a directory included in your system's `PATH`:
+
+    ```shell
+    # Example for Linux AMD64
+    tar -xzf flux-operator-mcp_linux_amd64.tar.gz
+    chmod +x flux-operator-mcp
+    sudo mv flux-operator-mcp /usr/local/bin/
+    ```
+
+    Verify the binary is accessible:
+
+    ```shell
+    flux-operator-mcp --version
+    ```
+  </Tab>
+  <Tab title="Build from Source">
+    Building from source requires Go 1.26 or later:
+
+    ```shell
+    git clone https://github.com/controlplaneio-fluxcd/flux-operator.git
+    cd flux-operator
+    make mcp-build
+    ```
+
+    The compiled binary is placed in the `bin/` directory relative to the repository root.
+    Move it to your `PATH`:
+
+    ```shell
+    sudo mv bin/flux-operator-mcp /usr/local/bin/
+    ```
+  </Tab>
+</Tabs>
+
+## Configure Your AI Assistant
+
+Once the binary is installed, add the MCP server configuration to your AI assistant. All clients use the same underlying JSON structure — only the file location differs.
+
+<Tabs>
+  <Tab title="Claude Desktop">
+    Open Claude Desktop's settings and navigate to the **MCP Servers** section,
+    or edit `~/Library/Application Support/Claude/claude_desktop_config.json` directly:
+
+    ```json
+    {
+      "mcpServers": {
+        "flux-operator-mcp": {
+          "command": "flux-operator-mcp",
+          "args": ["serve"],
+          "env": {
+            "KUBECONFIG": "/path/to/.kube/config"
+          }
+        }
+      }
+    }
+    ```
+
+    Restart Claude Desktop after saving the configuration. The Flux tools will appear in the tool picker.
+  </Tab>
+  <Tab title="Cursor">
+    Add the server to Cursor's MCP configuration at `~/.cursor/mcp.json`
+    or the workspace-level `.cursor/mcp.json`:
+
+    ```json
+    {
+      "mcpServers": {
+        "flux-operator-mcp": {
+          "command": "flux-operator-mcp",
+          "args": ["serve"],
+          "env": {
+            "KUBECONFIG": "/path/to/.kube/config"
+          }
+        }
+      }
+    }
+    ```
+
+    Reload Cursor's MCP settings via the Command Palette → **MCP: Reload Servers**.
+  </Tab>
+  <Tab title="Windsurf">
+    Edit the Windsurf MCP configuration at `~/.codeium/windsurf/mcp_config.json`:
+
+    ```json
+    {
+      "mcpServers": {
+        "flux-operator-mcp": {
+          "command": "flux-operator-mcp",
+          "args": ["serve"],
+          "env": {
+            "KUBECONFIG": "/path/to/.kube/config"
+          }
+        }
+      }
+    }
+    ```
+
+    Restart Windsurf to pick up the new configuration.
+  </Tab>
+  <Tab title="GitHub Copilot">
+    For GitHub Copilot in VS Code, add the server to `.vscode/mcp.json` in your workspace,
+    or the user-level settings. Ensure **Agent mode** is enabled in VS Code settings:
+
+    ```json
+    {
+      "servers": {
+        "flux-operator-mcp": {
+          "type": "stdio",
+          "command": "flux-operator-mcp",
+          "args": ["serve"],
+          "env": {
+            "KUBECONFIG": "/path/to/.kube/config"
+          }
+        }
+      }
+    }
+    ```
+
+    After saving, VS Code will prompt you to enable the new MCP server.
+  </Tab>
+  <Tab title="OpenAI Codex">
+    For the OpenAI Codex CLI, use the `codex mcp add` command:
+
+    ```shell
+    codex mcp add flux-operator-mcp \
+      --env KUBECONFIG=$HOME/.kube/config \
+      -- flux-operator-mcp serve
+    ```
+
+    This registers the server persistently in Codex's configuration.
+  </Tab>
+</Tabs>
+
+<Note>
+  Replace `/path/to/.kube/config` with the absolute path to your kubeconfig file.
+  Run `echo $HOME/.kube/config` to find the correct path on your system.
+</Note>
+
+## Kubernetes In-Cluster Deployment
+
+For teams that want the MCP server centrally managed rather than installed locally, you can deploy it as a workload on the cluster using a Flux `ResourceSet` and `HelmRelease`.
+
+Create a `ResourceSet` manifest in your GitOps repository:
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSet
+metadata:
+  name: flux-operator-mcp
+  namespace: flux-system
+spec:
+  inputs:
+    - readonly: false
+      accessFrom: flux-system
+  resources:
+    - apiVersion: source.toolkit.fluxcd.io/v1
+      kind: OCIRepository
+      metadata:
+        name: << inputs.provider.name >>
+        namespace: << inputs.provider.namespace >>
+      spec:
+        interval: 60m
+        url: oci://ghcr.io/controlplaneio-fluxcd/charts/flux-operator-mcp
+        layerSelector:
+          mediaType: "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
+          operation: copy
+        ref:
+          semver: "*"
+    - apiVersion: helm.toolkit.fluxcd.io/v2
+      kind: HelmRelease
+      metadata:
+        name: << inputs.provider.name >>
+        namespace: << inputs.provider.namespace >>
+      spec:
+        serviceAccountName: flux-operator
+        chartRef:
+          kind: OCIRepository
+          name: << inputs.provider.name >>
+        interval: 30m
+        values:
+          transport: http
+          readonly: << inputs.readonly >>
+          networkPolicy:
+            ingress:
+              namespaces: [<< inputs.accessFrom >>]
+```
+
+<Warning>
+  The in-cluster deployment runs with `cluster-admin` permissions. Set `readonly: true` in
+  production environments to prevent the AI assistant from modifying cluster state.
+</Warning>
+
+The server is exposed via a Kubernetes Service named `flux-operator-mcp` in the `flux-system` namespace on port `9090`. Connect to it via port-forwarding:
+
+```shell
+kubectl port-forward -n flux-system svc/flux-operator-mcp 9090:9090
+```
+
+Then add the following to your AI assistant's MCP configuration:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "flux-operator-mcp": {
+        "type": "http",
+        "url": "http://localhost:9090/mcp"
+      }
+    }
+  }
+}
+```
+
+## Testing Your Installation
+
+After configuring your AI assistant, copy the AI rules from
+[instructions.md](https://raw.githubusercontent.com/controlplaneio-fluxcd/flux-operator/refs/heads/main/docs/mcp/instructions.md)
+into your assistant's instruction settings (see [Prompting](/mcp/prompting) for details on each client).
+
+Then test with these prompts:
+
+- *"Which cluster contexts are available in my kubeconfig?"*
+- *"What version of Flux is running in my current cluster?"*
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Server not found">
+    - Verify the path to the binary is correct by running `which flux-operator-mcp`
+    - Ensure the binary has execute permissions: `chmod +x /path/to/flux-operator-mcp`
+    - Use the full absolute path to the binary in the MCP configuration if your AI client doesn't inherit your `PATH`
+  </Accordion>
+  <Accordion title="AI assistant can't find the tools">
+    - Restart the AI assistant application after saving configuration changes
+    - Verify the MCP configuration JSON is valid (no trailing commas, correct quotes)
+    - For VS Code-based clients, ensure **Agent mode** is enabled in settings
+  </Accordion>
+  <Accordion title="Kubeconfig not found">
+    - Confirm the path in the `KUBECONFIG` env variable is an absolute path, not `~`
+    - Verify the kubeconfig is valid: `kubectl get crds`
+    - If using multiple kubeconfig files, merge them or point to the correct one
+  </Accordion>
+  <Accordion title="Permission issues">
+    - Verify your kubeconfig user has sufficient permissions: `kubectl get fluxinstance -A`
+    - If using service account impersonation, ensure your user has the `impersonate` verb
+    - For read-only deployments, confirm reporting tools still work as expected
+  </Accordion>
+</AccordionGroup>
+
+## Upgrading
+
+1. Download the latest binary from the [GitHub Releases page](https://github.com/controlplaneio-fluxcd/flux-operator/releases)
+2. Replace the existing binary at the same path
+3. Restart any AI assistant applications that use the server
+
+For Homebrew installations:
+
+```shell
+brew upgrade flux-operator-mcp
+```

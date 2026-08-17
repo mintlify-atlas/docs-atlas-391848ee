@@ -1,0 +1,252 @@
+---
+title: "User Actions and Audit Logging in the Flux Web UI"
+sidebarTitle: "Actions"
+description: "Trigger reconciliations, suspend resources, restart workloads, and stream pod logs from the Flux Web UI, with full audit logging via Kubernetes Events."
+---
+
+The Flux Web UI provides interactive actions that allow users to manage Flux resources and Kubernetes workloads directly from the browser. Actions are only available when authentication is configured, and each action requires specific RBAC permissions granted through Kubernetes `ClusterRole` or `Role` resources. The Flux Operator ships with two predefined roles: `flux-web-user` (read-only) and `flux-web-admin` (full access including actions).
+
+## Access Modes
+
+The `.spec.userActions.access` field in the Web Config API determines how actions are authorized and performed:
+
+| Mode | How it works |
+|---|---|
+| `Impersonated` (default) | The Web UI verifies the per-action RBAC verb and then performs the operation by impersonating the user. The user must hold **both** the custom verb (e.g. `suspend`) **and** every native Kubernetes verb the operation requires (e.g. `patch`). |
+| `FineGrained` | The Web UI verifies the per-action verb against the user's identity, then performs the native Kubernetes operations using the **Web UI service account**. The user needs only the custom verb. |
+
+To enable `FineGrained` access with the Helm chart:
+
+```yaml
+web:
+  config:
+    userActions:
+      access: FineGrained
+```
+
+For a [standalone Web UI deployment](/web-ui/overview#standalone-deployment), set both the config value and the chart-level value so the service account is granted the native permissions it needs:
+
+```yaml
+web:
+  config:
+    userActions:
+      access: FineGrained
+  userActions:
+    access: FineGrained
+```
+
+<Note>
+  Viewing pod logs is always performed with the user's own identity regardless of the access mode. It has no custom RBAC verb — the user must hold the native `get` verb on `pods/log`.
+</Note>
+
+## GitOps Actions
+
+GitOps actions operate on Flux resources such as Kustomizations, HelmReleases, and source resources. They appear in the action bar on the resource detail page.
+
+### Reconcile
+
+Triggers an immediate reconciliation of a Flux resource, bypassing its regular interval. For HelmRelease and ResourceSetInputProvider resources, a force flag is also added to ensure the reconciliation runs even when no changes are detected.
+
+<Tabs>
+  <Tab title="Impersonated">
+    The user needs:
+    - `reconcile` verb on the target resource
+    - `get` and `patch` on the target resource
+  </Tab>
+  <Tab title="FineGrained">
+    The user needs:
+    - `reconcile` verb on the target resource
+
+    The Web UI service account needs `get` and `patch`.
+  </Tab>
+</Tabs>
+
+### Pull
+
+Reconciles the **upstream source** (GitRepository, OCIRepository, Bucket, or HelmChart) of a Kustomization or HelmRelease, fetching the latest changes without waiting for the source's own reconciliation interval. Pull is not available when the resource or its source is suspended, or when the source is an ExternalArtifact.
+
+<Tabs>
+  <Tab title="Impersonated">
+    The user needs:
+    - `reconcile` verb on the **source** resource
+    - `get` and `patch` on the **source** resource
+  </Tab>
+  <Tab title="FineGrained">
+    The user needs:
+    - `reconcile` verb on the **source** resource
+
+    The Web UI service account needs `get` and `patch`.
+  </Tab>
+</Tabs>
+
+### Suspend and Resume
+
+**Suspend** pauses reconciliation. The Web UI stores which user suspended the resource as an annotation. **Resume** re-enables reconciliation and triggers an immediate reconciliation request; it also removes the suspension tracking annotation.
+
+<Tabs>
+  <Tab title="Impersonated">
+    The user needs:
+    - `suspend` (to suspend) or `resume` (to resume) on the target resource
+    - `get` and `patch` on the target resource
+  </Tab>
+  <Tab title="FineGrained">
+    The user needs:
+    - `suspend` or `resume` on the target resource
+
+    The Web UI service account needs `get` and `patch`.
+  </Tab>
+</Tabs>
+
+### Download Artifact
+
+Downloads the artifact tarball from a Flux source resource. Available for Bucket, GitRepository, OCIRepository, HelmChart, and ExternalArtifact resources. For ArtifactGenerator resources, a dropdown lists all ExternalArtifacts so each can be downloaded individually.
+
+<Tabs>
+  <Tab title="Impersonated">
+    The user needs:
+    - `download` verb on the source resource
+    - `get` on the source resource (to read the artifact URL from status)
+  </Tab>
+  <Tab title="FineGrained">
+    The user needs:
+    - `download` verb on the source resource
+
+    The Web UI service account needs `get`.
+  </Tab>
+</Tabs>
+
+<Note>
+  Artifact fetches do not follow redirects and reject literal IP addresses. Every destination is resolved and validated against loopback and link-local ranges before the connection is established, preventing SSRF attacks.
+</Note>
+
+## Workload Actions
+
+Workload actions operate on Kubernetes workloads managed by Flux. They are available on the workload detail page for Deployments, StatefulSets, DaemonSets, CronJobs, and Pods.
+
+### View Logs
+
+Streams a pod's container logs in a read-only viewer. Available per-pod from the Pods list, and as an aggregate "View logs" button that collects logs from all the workload's pods.
+
+**RBAC (both modes):** The user must hold the native `get` verb on the `pods/log` subresource in the core API group. This action always uses the user's own identity — it is not controlled by `.spec.userActions.access`.
+
+### Rollout Restart
+
+Triggers a rolling restart of a Deployment, StatefulSet, or DaemonSet by patching the pod template with a `kubectl.kubernetes.io/restartedAt` annotation — equivalent to `kubectl rollout restart`.
+
+<Tabs>
+  <Tab title="Impersonated">
+    The user needs:
+    - `restart` verb on the workload resource (in the `apps` API group)
+    - `patch` on the workload resource
+  </Tab>
+  <Tab title="FineGrained">
+    The user needs:
+    - `restart` verb on the workload resource
+
+    The Web UI service account needs `patch`.
+  </Tab>
+</Tabs>
+
+### Run Job
+
+Creates a new Job from a CronJob's job template, triggering an immediate execution outside the schedule. The created Job is owned by the CronJob so its pods appear under the CronJob in the Web UI. The Web UI records which user created the Job.
+
+<Tabs>
+  <Tab title="Impersonated">
+    The user needs:
+    - `restart` verb on `cronjobs` (in the `batch` API group)
+    - `get` on `cronjobs`
+    - `create` on `jobs`
+  </Tab>
+  <Tab title="FineGrained">
+    The user needs:
+    - `restart` verb on `cronjobs`
+
+    The Web UI service account needs `get` on `cronjobs` and `create` on `jobs`.
+  </Tab>
+</Tabs>
+
+### Delete Pod
+
+Deletes an individual pod. For pods owned by a Deployment, StatefulSet, or DaemonSet, the controller recreates the pod automatically. A confirmation dialog is shown before deletion.
+
+**RBAC (both modes):** The `delete` verb on `pods` in the core API group is required. Because `delete` is also a native Kubernetes verb, granting it allows pod deletion via `kubectl` and other clients as well.
+
+## Audit Logging
+
+The Web UI can generate audit events for every action that uses a custom per-action RBAC verb, providing a record of who performed what action and when. Viewing pod logs is not audited because it relies only on the native `get` verb.
+
+### Enabling Audit
+
+Set `userActions.audit` to a list of action names, or use `["*"]` to capture all actions:
+
+```yaml
+web:
+  config:
+    userActions:
+      audit:
+        - "*"
+    authentication:
+      type: OAuth2
+      oauth2:
+        provider: OIDC
+        # ... omitted for brevity ...
+```
+
+To audit only specific actions:
+
+```yaml
+web:
+  config:
+    userActions:
+      audit:
+        - reconcile
+        - suspend
+        - resume
+        - download
+        - restart
+        - delete
+```
+
+### Audit Event Format
+
+Each audited action generates a Kubernetes Event with the reason `WebAction`. The event message includes the username, action, and target resource. The following annotations are set on the event:
+
+| Annotation | Description |
+|---|---|
+| `event.toolkit.fluxcd.io/action` | Action name (e.g. `reconcile`, `suspend`) |
+| `event.toolkit.fluxcd.io/username` | Username of the user who performed the action |
+| `event.toolkit.fluxcd.io/groups` | Groups of the user who performed the action |
+| `event.toolkit.fluxcd.io/subject` | Target workload (for workload actions only) |
+
+For workload actions (rollout restart, create job, delete pod), the audit event is associated with the Flux resource managing the workload (e.g. the Kustomization or HelmRelease), so audit trails map back to the GitOps pipeline.
+
+### Notifications with Flux Alerts
+
+Audit events are automatically forwarded to Flux's `notification-controller` when it is present in the cluster. Configure `Alert` and `Provider` resources to route notifications to Slack, Microsoft Teams, or any webhook:
+
+```yaml
+apiVersion: notification.toolkit.fluxcd.io/v1beta3
+kind: Alert
+metadata:
+  name: web-actions-audit
+  namespace: apps
+spec:
+  providerRef:
+    name: slack
+  eventSources:
+    - kind: Kustomization
+      name: "*"
+    - kind: HelmRelease
+      name: "*"
+    - kind: ResourceSet
+      name: "*"
+  inclusionList:
+    - ".*on the web UI$"
+```
+
+The `inclusionList` regex matches the audit event message format, ensuring only Web UI action events are forwarded to the notification provider.
+
+<Tip>
+  All audit event writes use the Web UI's own service-account privileges, not the user's impersonated identity. This guarantees a complete, tamper-resistant audit trail regardless of the acting user's read permissions.
+</Tip>

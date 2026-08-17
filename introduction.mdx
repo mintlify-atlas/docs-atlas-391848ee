@@ -1,0 +1,122 @@
+---
+title: "Flux Operator: GitOps on Autopilot Mode"
+sidebarTitle: "Introduction"
+description: "Flux Operator is a Kubernetes CRD controller that automates Flux CD lifecycle management, self-service environments, and AI-powered GitOps operations."
+---
+
+Flux Operator is a Kubernetes CRD controller that manages the full lifecycle of [CNCF Flux CD](https://fluxcd.io) and the [ControlPlane enterprise distribution](https://github.com/controlplaneio-fluxcd/distribution). It eliminates the operational burden of manually bootstrapping and upgrading Flux across fleets of clusters by providing a fully declarative, automated approach to GitOps infrastructure.
+
+<CardGroup cols={2}>
+  <Card title="Install the Operator" icon="rocket" href="/guides/installation">
+    Deploy Flux Operator via Helm, Terraform, OLM, or kubectl in minutes.
+  </Card>
+  <Card title="Configure Flux Instance" icon="gear" href="/instance/controllers">
+    Declare your Flux distribution, components, and cluster settings.
+  </Card>
+  <Card title="ResourceSet API" icon="layer-group" href="/resourcesets/introduction">
+    Build self-service environments and ephemeral preview deployments.
+  </Card>
+  <Card title="MCP Server" icon="robot" href="/mcp/overview">
+    Connect AI assistants to your cluster for natural language GitOps.
+  </Card>
+</CardGroup>
+
+## What is Flux Operator?
+
+Flux Operator offers an alternative to the `flux bootstrap` procedure. Instead of running a one-time bootstrap command that commits Flux manifests to Git, you declare a `FluxInstance` resource and the operator continuously reconciles the desired Flux state — installing, configuring, and upgrading controllers automatically.
+
+<CardGroup cols={2}>
+  <Card title="Autopilot for Flux CD" icon="wand-magic-sparkles">
+    Fully automates Flux installation, configuration, and upgrades based on a declarative API. No more manual `flux bootstrap` commands.
+  </Card>
+  <Card title="Advanced Configuration" icon="sliders">
+    Simplifies multi-tenancy lockdown, sharding, horizontal/vertical scaling, persistent storage, and Kustomize patch customization.
+  </Card>
+  <Card title="Self-Service Environments" icon="users">
+    The ResourceSet API lets platform teams define application standards that developers can deploy as self-service ephemeral environments.
+  </Card>
+  <Card title="Deep Insights" icon="chart-line">
+    Detailed reports and Prometheus metrics on Flux controller readiness, reconciler statistics, and cluster synchronization state.
+  </Card>
+  <Card title="Flux Web UI" icon="display">
+    Real-time view of GitOps pipelines with monitoring, reconciliation status, and troubleshooting capabilities.
+  </Card>
+  <Card title="AI-Assisted GitOps" icon="brain">
+    The Flux MCP Server connects AI assistants to clusters for natural language interaction with GitOps pipelines.
+  </Card>
+</CardGroup>
+
+## Quick Start
+
+<Steps>
+  <Step title="Install the Operator">
+    Deploy Flux Operator into the `flux-system` namespace using Helm:
+
+    ```shell
+    helm install flux-operator oci://ghcr.io/controlplaneio-fluxcd/charts/flux-operator \
+      --namespace flux-system \
+      --create-namespace
+    ```
+  </Step>
+  <Step title="Create a FluxInstance">
+    Apply a `FluxInstance` resource to install Flux controllers:
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: FluxInstance
+    metadata:
+      name: flux
+      namespace: flux-system
+    spec:
+      distribution:
+        version: "2.x"
+        registry: "ghcr.io/fluxcd"
+        artifact: "oci://ghcr.io/controlplaneio-fluxcd/flux-operator-manifests"
+      components:
+        - source-controller
+        - kustomize-controller
+        - helm-controller
+        - notification-controller
+      cluster:
+        type: kubernetes
+        size: medium
+    ```
+  </Step>
+  <Step title="Verify Installation">
+    Check the FluxReport to confirm all controllers are running:
+
+    ```shell
+    kubectl get fluxreport/flux -n flux-system -o yaml
+    ```
+  </Step>
+  <Step title="Configure Cluster Sync">
+    Add a `sync` section to your `FluxInstance` to sync from a Git repository:
+
+    ```yaml
+    spec:
+      sync:
+        kind: GitRepository
+        url: "https://github.com/my-org/my-fleet.git"
+        ref: "refs/heads/main"
+        path: "clusters/my-cluster"
+        pullSecret: "flux-system"
+    ```
+  </Step>
+</Steps>
+
+## Core Concepts
+
+| Concept | Description |
+|---|---|
+| **FluxInstance** | Declares the desired Flux distribution, components, cluster settings, and sync configuration |
+| **FluxReport** | Auto-generated read-only report of the Flux installation state, updated every 5 minutes |
+| **ResourceSet** | Generates Kubernetes resources from a matrix of inputs for self-service deployments |
+| **ResourceSetInputProvider** | Fetches dynamic inputs from GitHub, GitLab, OCI registries, and external services |
+| **Flux MCP Server** | AI bridge enabling natural language interaction with GitOps pipelines |
+
+## Project Status
+
+- Licensed under [AGPL-3.0](https://github.com/controlplaneio-fluxcd/flux-operator/blob/main/LICENSE)
+- Available on [Artifact Hub](https://artifacthub.io/packages/helm/flux-operator/flux-operator) and [OperatorHub](https://operatorhub.io/operator/flux-operator)
+- SLSA Level 3 supply chain security
+- End-to-end tested on Red Hat OpenShift, Amazon EKS, Azure AKS, and Google GKE

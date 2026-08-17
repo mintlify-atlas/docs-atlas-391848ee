@@ -1,0 +1,237 @@
+---
+title: "Customize Flux Controllers with Kustomize Patches"
+sidebarTitle: "Customization"
+description: "Apply strategic merge and JSON patches to Flux controller deployments for node affinity, resource limits, HTTP proxy, SOPS decryption, and signature verification."
+---
+
+The `FluxInstance` resource exposes a `spec.kustomize.patches` field that lets you apply strategic merge patches or JSON patches directly to the Flux manifests before they are applied to the cluster. This gives you fine-grained control over every aspect of the Flux controllers — from resource limits and node scheduling to environment variables and secrets — without forking or maintaining separate Kustomize overlays.
+
+## Patch Targeting
+
+Patches are matched against generated Flux resources using a `target` selector. You can target by `kind`, by name (including regex), or by a combination of both. The `namespace` field must never be set in a patch target because all patches are scoped to the instance namespace automatically.
+
+```yaml
+spec:
+  kustomize:
+    patches:
+      # Target all controller Deployments
+      - patch: |
+          # strategic merge or JSON patch
+        target:
+          kind: Deployment
+
+      # Target kustomize-controller and helm-controller by name regex
+      - patch: |
+          # strategic merge or JSON patch
+        target:
+          kind: Deployment
+          name: "(kustomize-controller|helm-controller)"
+
+      # Target a single ServiceAccount by name
+      - patch: |
+          # strategic merge or JSON patch
+        target:
+          kind: ServiceAccount
+          name: "source-controller"
+```
+
+<Warning>
+The `patch.target` field **must not** include a `namespace` key. All patches are applied only within the namespace where the `FluxInstance` is deployed.
+</Warning>
+
+### Verifying Patches Locally
+
+Use the Flux Operator CLI to build the `FluxInstance` locally and inspect the generated manifests before applying them to the cluster:
+
+```shell
+flux-operator build instance -f flux.yaml
+```
+
+## Patch Examples
+
+### Increase Concurrency and Resource Limits
+
+Raise the worker concurrency and CPU/memory ceiling for the reconciliation-heavy controllers:
+
+```yaml
+spec:
+  kustomize:
+    patches:
+      - patch: |
+          - op: add
+            path: /spec/template/spec/containers/0/args/-
+            value: --concurrent=10
+          - op: add
+            path: /spec/template/spec/containers/0/args/-
+            value: --requeue-dependency=5s
+          - op: replace
+            path: /spec/template/spec/containers/0/resources/limits
+            value:
+              cpu: 2000m
+              memory: 2048Mi
+        target:
+          kind: Deployment
+          name: "(kustomize-controller|helm-controller|source-controller)"
+```
+
+### Node Affinity and Tolerations
+
+Schedule all Flux controllers on dedicated nodes labelled `role=flux` and tolerate the matching taint:
+
+```yaml
+spec:
+  kustomize:
+    patches:
+      - patch: |
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: all
+          spec:
+            template:
+              metadata:
+                annotations:
+                  cluster-autoscaler.kubernetes.io/safe-to-evict: "true"
+              spec:
+                affinity:
+                  nodeAffinity:
+                    requiredDuringSchedulingIgnoredDuringExecution:
+                      nodeSelectorTerms:
+                        - matchExpressions:
+                            - key: role
+                              operator: In
+                              values:
+                                - flux
+                tolerations:
+                  - effect: NoSchedule
+                    key: role
+                    operator: Equal
+                    value: flux
+        target:
+          kind: Deployment
+```
+
+### HTTP/S Proxy
+
+Route outbound traffic from all controllers through a corporate proxy, and exclude in-cluster DNS from proxying:
+
+```yaml
+spec:
+  kustomize:
+    patches:
+      - patch: |
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: all
+          spec:
+            template:
+              spec:
+                containers:
+                  - name: manager
+                    env:
+                      - name: "HTTPS_PROXY"
+                        value: "https://proxy.example.com"
+                      - name: "NO_PROXY"
+                        value: ".cluster.local.,.cluster.local,.svc"
+        target:
+          kind: Deployment
+```
+
+### Namespace Pod Security Standards
+
+Enforce the `restricted` Pod Security Standard on the `flux-system` namespace:
+
+```yaml
+spec:
+  kustomize:
+    patches:
+      - patch: |
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: flux-system
+            labels:
+              pod-security.kubernetes.io/enforce: restricted
+        target:
+          kind: Namespace
+```
+
+### Cluster Sync Semver Range
+
+Override the ref of all auto-generated sync sources to track any version `>=1.0.0`:
+
+```yaml
+spec:
+  kustomize:
+    patches:
+      - patch: |
+          - op: replace
+            path: /spec/ref
+            value:
+              semver: ">=1.0.0-0"
+        target:
+          kind: (GitRepository|OCIRepository)
+```
+
+### SOPS Decryption
+
+Enable SOPS decryption on the auto-generated `Kustomization`, referencing a secret that holds the encryption key:
+
+```yaml
+spec:
+  kustomize:
+    patches:
+      - patch: |
+          - op: add
+            path: /spec/decryption
+            value:
+              provider: sops
+              secretRef:
+                name: flux-sops
+        target:
+          kind: Kustomization
+```
+
+### GitRepository GPG Verification
+
+Verify Git commits against a set of PGP public keys before applying them:
+
+```yaml
+spec:
+  kustomize:
+    patches:
+      - patch: |
+          - op: add
+            path: /spec/verify
+            value:
+              mode: HEAD
+              secretRef:
+                name: pgp-public-keys
+        target:
+          kind: GitRepository
+```
+
+### OCIRepository Cosign Keyless Verification
+
+Use cosign keyless verification with an OIDC identity match to confirm OCI artifacts were signed by a trusted GitHub Actions workflow:
+
+```yaml
+spec:
+  kustomize:
+    patches:
+      - patch: |
+          - op: add
+            path: /spec/verify
+            value:
+              provider: cosign
+              matchOIDCIdentity:
+              - issuer: ^https://token\.actions\.githubusercontent\.com$
+                subject: ^https://github\.com/<owner>/<repo>/\.github/workflows/push-flux-system\.yml@refs/heads/main$
+        target:
+          kind: OCIRepository
+```
+
+<Tip>
+For a complete catalogue of Flux bootstrap customization options — including custom image pull secrets, workload identity, and provider-specific annotations — refer to the [Flux bootstrap configuration documentation](https://fluxcd.io/flux/installation/configuration/).
+</Tip>

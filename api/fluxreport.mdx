@@ -1,0 +1,387 @@
+---
+title: "FluxReport API Reference (fluxcd.controlplane.io/v1)"
+sidebarTitle: "FluxReport"
+description: "Complete API reference for the FluxReport CRD — auto-generated read-only snapshot of your Flux installation health, components, and reconciler statistics."
+---
+
+The **FluxReport** custom resource is a read-only, automatically generated snapshot of the observed state of a Flux installation. Its purpose is to aid monitoring, troubleshooting, and auditing by surfacing Flux component health, distribution metadata, reconciler statistics, cluster sync status, and operator information in a single machine-readable object.
+
+A single `FluxReport` named `flux` exists per cluster and is managed entirely by the flux-operator — you should never create or edit it manually. The operator regenerates it at startup, whenever a `FluxInstance` changes, and on a configurable polling interval (default `5m`). You interact with it through `kubectl get`, annotations, and Prometheus scraping.
+
+## Example output
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: FluxReport
+metadata:
+  name: flux
+  namespace: flux-system
+spec:
+  cluster:
+    platform: linux/arm64
+    serverVersion: v1.33.0
+    nodes: 5
+  distribution:
+    entitlement: Issued by controlplane
+    managedBy: flux-operator
+    status: Installed
+    version: v2.3.0
+  operator:
+    apiVersion: fluxcd.controlplane.io/v1
+    platform: linux/arm64
+    version: v0.24.0
+  components:
+    - name: helm-controller
+      image: ghcr.io/fluxcd/helm-controller:v1.0.1@sha256:a67a037faa850220ff94d8090253732079589ad9ff10b6ddf294f3b7cd0f3424
+      ready: true
+      status: "Current Deployment is available. Replicas: 1"
+    - name: kustomize-controller
+      image: ghcr.io/fluxcd/kustomize-controller:v1.3.0@sha256:48a032574dd45c39750ba0f1488e6f1ae36756a38f40976a6b7a588d83acefc1
+      ready: true
+      status: "Current Deployment is available. Replicas: 1"
+    - name: notification-controller
+      image: ghcr.io/fluxcd/notification-controller:v1.3.0@sha256:c0fab940c7e578ea519097d36c040238b0cc039ce366fdb753947428bbf0c3d6
+      ready: true
+      status: "Current Deployment is available. Replicas: 1"
+    - name: source-controller
+      image: ghcr.io/fluxcd/source-controller:v1.3.0@sha256:161da425b16b64dda4b3cec2ba0f8d7442973aba29bb446db3b340626181a0bc
+      ready: true
+      status: "Current Deployment is available. Replicas: 1"
+  reconcilers:
+    - apiVersion: fluxcd.controlplane.io/v1
+      kind: ResourceSet
+      stats:
+        failing: 0
+        running: 5
+        suspended: 1
+    - apiVersion: helm.toolkit.fluxcd.io/v2
+      kind: HelmRelease
+      stats:
+        failing: 1
+        running: 42
+        suspended: 3
+    - apiVersion: kustomize.toolkit.fluxcd.io/v1
+      kind: Kustomization
+      stats:
+        failing: 0
+        running: 5
+        suspended: 0
+    - apiVersion: source.toolkit.fluxcd.io/v1
+      kind: GitRepository
+      stats:
+        failing: 0
+        running: 2
+        suspended: 0
+        totalSize: 3.7 MiB
+    - apiVersion: source.toolkit.fluxcd.io/v1
+      kind: HelmChart
+      stats:
+        failing: 1
+        running: 55
+        suspended: 0
+        totalSize: 15.7 MiB
+    - apiVersion: source.toolkit.fluxcd.io/v1
+      kind: HelmRepository
+      stats:
+        failing: 0
+        running: 7
+        suspended: 3
+        totalSize: 40.5 MiB
+  sync:
+    ready: true
+    id: kustomization/flux-system
+    path: clusters/production
+    source: https://github.com/my-org/my-fleet.git
+    status: "Applied revision: refs/heads/main@sha1:a90cd1ac35de01c175f7199315d3f4cd60195911"
+status:
+  conditions:
+    - lastTransitionTime: "2024-06-20T19:59:30Z"
+      message: Reporting finished in 272ms
+      observedGeneration: 4
+      reason: ReconciliationSucceeded
+      status: "True"
+      type: Ready
+```
+
+## Working with FluxReport
+
+```shell
+# Export the full report in YAML
+kubectl -n flux-system get fluxreport/flux -o yaml
+
+# Trigger an immediate refresh
+kubectl -n flux-system annotate --overwrite fluxreport/flux \
+  reconcile.fluxcd.io/requestedAt="$(date +%s)"
+
+# Change the polling interval to 5 minutes
+kubectl -n flux-system annotate --overwrite fluxreport/flux \
+  fluxcd.controlplane.io/reconcileEvery=5m
+
+# Pause report updates
+kubectl -n flux-system annotate --overwrite fluxreport/flux \
+  fluxcd.controlplane.io/reconcile=disabled
+
+# Resume report updates
+kubectl -n flux-system annotate --overwrite fluxreport/flux \
+  fluxcd.controlplane.io/reconcile=enabled
+```
+
+---
+
+## Spec fields
+
+<Note>
+All `spec` fields are **populated by the operator** — they reflect observed state, not desired state. Do not set them manually.
+</Note>
+
+### `spec.cluster`
+
+Information about the Kubernetes cluster hosting Flux.
+
+<ParamField body="serverVersion" type="string">
+  Kubernetes API server version, e.g. `v1.33.0`.
+</ParamField>
+
+<ParamField body="platform" type="string">
+  OS and architecture of the Kubernetes control plane, e.g. `linux/arm64`.
+</ParamField>
+
+<ParamField body="nodes" type="integer">
+  Total number of nodes in the cluster.
+</ParamField>
+
+---
+
+### `spec.distribution`
+
+Version and entitlement information for the installed Flux distribution.
+
+<ParamField body="version" type="string">
+  Exact semver version of the Flux instance, e.g. `v2.3.0`.
+</ParamField>
+
+<ParamField body="status" type="string">
+  Human-readable installation status, e.g. `Installed` or `Not installed`.
+</ParamField>
+
+<ParamField body="entitlement" type="string">
+  Entitlement verification message, e.g. `Issued by controlplane` for the ControlPlane enterprise distribution.
+</ParamField>
+
+<ParamField body="managedBy" type="string">
+  Tool managing the distribution, e.g. `flux-operator` or `flux bootstrap`.
+</ParamField>
+
+Example when Flux was bootstrapped directly (not via the operator):
+
+```yaml
+spec:
+  distribution:
+    entitlement: Issued by controlplane
+    managedBy: "flux bootstrap"
+    status: Installed
+    version: v2.3.0
+```
+
+---
+
+### `spec.operator`
+
+Version and platform information for the flux-operator itself.
+
+<ParamField body="apiVersion" type="string">
+  API version of the flux-operator, e.g. `fluxcd.controlplane.io/v1`.
+</ParamField>
+
+<ParamField body="version" type="string">
+  Operator release version, e.g. `v0.24.0`.
+</ParamField>
+
+<ParamField body="platform" type="string">
+  OS and architecture of the operator pod, e.g. `linux/arm64`.
+</ParamField>
+
+---
+
+### `spec.components`
+
+Deployment readiness for each Flux controller.
+
+<ParamField body="name" type="string">
+  Controller name, e.g. `source-controller`.
+</ParamField>
+
+<ParamField body="image" type="string">
+  Full image reference including tag and digest, e.g. `ghcr.io/fluxcd/source-controller:v1.3.0@sha256:161da…`.
+</ParamField>
+
+<ParamField body="ready" type="boolean">
+  `true` when the controller `Deployment` is available.
+</ParamField>
+
+<ParamField body="status" type="string">
+  Human-readable deployment status, e.g. `Current Deployment is available. Replicas: 1`.
+</ParamField>
+
+---
+
+### `spec.reconcilers`
+
+Statistics for every Flux resource kind found in the cluster, grouped by `apiVersion` and `kind`.
+
+<ParamField body="apiVersion" type="string">
+  API group and version of the resource kind, e.g. `kustomize.toolkit.fluxcd.io/v1`.
+</ParamField>
+
+<ParamField body="kind" type="string">
+  Resource kind, e.g. `Kustomization`, `HelmRelease`, `GitRepository`.
+</ParamField>
+
+<Expandable title="stats fields">
+
+<ParamField body="running" type="integer">
+  Number of resources with `Ready=True`.
+</ParamField>
+
+<ParamField body="failing" type="integer">
+  Number of non-suspended resources with `Ready=False`.
+</ParamField>
+
+<ParamField body="suspended" type="integer">
+  Number of resources with reconciliation suspended.
+</ParamField>
+
+<ParamField body="totalSize" type="string">
+  Total size of locally cached artifacts for source-type resources, e.g. `40.5 MiB`. Only present for `GitRepository`, `HelmRepository`, `HelmChart`, and `OCIRepository`.
+</ParamField>
+
+</Expandable>
+
+```yaml
+spec:
+  reconcilers:
+    - apiVersion: kustomize.toolkit.fluxcd.io/v1
+      kind: Kustomization
+      stats:
+        failing: 0
+        running: 5
+        suspended: 0
+    - apiVersion: source.toolkit.fluxcd.io/v1
+      kind: GitRepository
+      stats:
+        failing: 0
+        running: 2
+        suspended: 0
+        totalSize: 3.7 MiB
+```
+
+---
+
+### `spec.sync`
+
+Current state of the cluster-wide GitOps sync configured via `FluxInstance.spec.sync`.
+
+<ParamField body="id" type="string">
+  Identifier of the primary sync Kustomization, e.g. `kustomization/flux-system`.
+</ParamField>
+
+<ParamField body="source" type="string">
+  URL of the source repository, e.g. `https://github.com/my-org/my-fleet.git`.
+</ParamField>
+
+<ParamField body="path" type="string">
+  Kustomize path being synced, e.g. `clusters/production`.
+</ParamField>
+
+<ParamField body="ready" type="boolean">
+  `true` when the sync Kustomization has `Ready=True`.
+</ParamField>
+
+<ParamField body="status" type="string">
+  Human-readable sync status, including the last applied revision.
+</ParamField>
+
+---
+
+## Reconciliation annotations
+
+| Annotation | Default | Description |
+|---|---|---|
+| `fluxcd.controlplane.io/reconcile` | `enabled` | Set to `disabled` to stop updating the report. |
+| `fluxcd.controlplane.io/reconcileEvery` | `5m` | Report refresh interval. Can also be set globally with the `--reporting-interval` flag on the operator deployment or the `REPORTING_INTERVAL` environment variable. |
+| `reconcile.fluxcd.io/requestedAt` | — | Set to the current Unix timestamp to trigger an immediate refresh. |
+
+---
+
+## When is the report generated?
+
+The operator refreshes the `FluxReport` automatically under the following conditions:
+
+- At operator startup or upgrade.
+- Whenever the associated `FluxInstance` is created or updated.
+- When `reconcile.fluxcd.io/requestedAt` is annotated on the report.
+- On the polling schedule defined by `fluxcd.controlplane.io/reconcileEvery` (default `5m`).
+
+---
+
+## Status
+
+### Conditions
+
+| Type | Status | Reason | Meaning |
+|---|---|---|---|
+| `Ready` | `True` | `ReconciliationSucceeded` | Report was generated successfully. |
+| `Ready` | `False` | `ReconciliationFailed` | Report generation failed; check operator logs. |
+
+---
+
+## Prometheus metrics
+
+The operator exports one metric for **every Flux resource** found in the cluster. Metrics are refreshed at the same time the `FluxReport` is updated.
+
+```
+flux_resource_info{uid, kind, name, exported_namespace, ready, reason, suspended, ...}
+```
+
+**Common labels** (present on all resource kinds):
+
+| Label | Description |
+|---|---|
+| `uid` | Kubernetes resource UID |
+| `kind` | Resource kind (e.g. `Kustomization`) |
+| `name` | Resource name |
+| `exported_namespace` | Resource namespace |
+| `ready` | `True`, `False`, or `Unknown` |
+| `reason` | Readiness reason string |
+| `suspended` | `True` or `False` |
+
+**Kind-specific labels:**
+
+| Resource Kind | Extra Labels |
+|---|---|
+| `Kustomization` | `revision`, `source_name`, `path` |
+| `GitRepository` | `revision`, `url`, `ref` |
+| `OCIRepository` | `revision`, `url`, `ref` |
+| `Bucket` | `revision`, `url`, `ref` |
+| `HelmRelease` | `revision`, `source_name` |
+| `HelmChart` | `revision`, `source_name` |
+| `HelmRepository` | `revision`, `url` |
+| `Receiver` | `url` |
+| `ImageRepository` | `url` |
+| `ImagePolicy` | `source_name` |
+| `ImageUpdateAutomation` | `source_name` |
+
+```text
+flux_resource_info{
+  exported_namespace="flux-system",
+  kind="Kustomization",
+  name="flux-system",
+  path="production/clusters",
+  ready="True",
+  reason="ReconciliationSucceeded",
+  revision="refs/heads/main@sha1:d3c6dfa21465cc540d214811f46694fee0ce700d",
+  source_name="flux-system",
+  suspended="False",
+  uid="359219f3-0793-4cf0-89a1-990ef1ac8098"
+}
+```

@@ -1,0 +1,338 @@
+---
+title: "Define Multi-Instance Applications with ResourceSets"
+sidebarTitle: "App Definitions"
+description: "Use ResourceSets to bundle Flux and Kubernetes resources into parameterised app definitions for multi-instance, multi-cluster, and microservice deployments."
+---
+
+The Flux Operator ResourceSet API enables platform teams to define their own application standard as a group of Flux and Kubernetes resources that can be templated, parameterized, and deployed as a single unit across environments. Instead of maintaining a growing tree of Kustomize overlays or Helm umbrella charts, a single `ResourceSet` manifest encapsulates the full application lifecycle — from the source reference to the Helm values — and stamps it out for every configured instance automatically.
+
+## Use Cases
+
+- **Multi-instance provisioning** — Generate multiple instances of the same application in a cluster with different configurations (e.g., one per tenant).
+- **Multi-cluster provisioning** — Generate instances for each target cluster that are deployed by Flux from a management cluster.
+- **Multi-tenancy provisioning** — Generate a Namespace, ServiceAccount, RoleBinding, and Flux resources for each tenant to simplify onboarding on a shared cluster.
+- **Dependency management** — Define dependencies between apps using existence checks or CEL readiness expressions, supporting a broader set of objects than Flux's built-in `dependsOn`.
+
+## Multi-Instance Example
+
+With Kustomize overlays, deploying one app instance per tenant requires a base directory and a separate overlay per tenant:
+
+```text
+apps/
+└── app1
+    ├── base
+    │   ├── flux-helm-release.yaml
+    │   ├── flux-oci-repository.yaml
+    │   └── kustomization.yaml
+    ├── overlays
+    │   ├── tenant1
+    │   │   ├── kustomization.yaml
+    │   │   ├── values-patch.yaml
+    │   │   └── version-patch.yaml
+    │   └── tenant2
+    │       ├── kustomization.yaml
+    │       ├── values-patch.yaml
+    │       └── version-patch.yaml
+    └── bundle
+        └── kustomization.yaml
+```
+
+The same result can be achieved with a single `ResourceSet` file by embedding the inputs inline:
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSet
+metadata:
+  name: app1
+  namespace: apps
+spec:
+  inputs:
+    - tenant: "tenant1"
+      app:
+        version: "6.7.x"
+        replicas: 2
+    - tenant: "tenant2"
+      app:
+        version: "6.6.x"
+        replicas: 3
+  resources:
+    - apiVersion: source.toolkit.fluxcd.io/v1
+      kind: OCIRepository
+      metadata:
+        name: app1-<< inputs.tenant >>
+        namespace: apps
+      spec:
+        interval: 10m
+        url: oci://my.registry/org/charts/app1
+        ref:
+          semver: << inputs.app.version | quote >>
+    - apiVersion: helm.toolkit.fluxcd.io/v2
+      kind: HelmRelease
+      metadata:
+        name: app1-<< inputs.tenant >>
+        namespace: apps
+      spec:
+        interval: 1h
+        releaseName: app1-<< inputs.tenant >>
+        chartRef:
+          kind: OCIRepository
+          name: app1-<< inputs.tenant >>
+        values:
+          replicaCount: << inputs.app.replicas | int >>
+```
+
+The ResourceSet controller renders the `resources` block once per entry in `spec.inputs`, substituting `<< inputs.* >>` expressions with the corresponding values.
+
+## Decoupled Inputs with Static Providers
+
+You may want to separate the inputs from the `ResourceSet` manifest to allow different teams to manage each application instance independently, without requiring every instance to be listed in the central `ResourceSet` manifest. Declare the inputs in separate `ResourceSetInputProvider` resources of type `Static` and reference them dynamically via label selectors:
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSet
+metadata:
+  name: app1
+  namespace: apps
+spec:
+  inputsFrom:
+    - kind: ResourceSetInputProvider
+      selector:
+        matchLabels:
+          some: label
+        matchExpressions:
+          - key: anotherLabel
+            operator: In
+            values:
+              - value1
+              - value2
+  resources:
+    - apiVersion: source.toolkit.fluxcd.io/v1
+      kind: OCIRepository
+      metadata:
+        name: app1-<< inputs.tenant >>
+        namespace: apps
+      spec:
+        interval: 10m
+        url: oci://my.registry/org/charts/app1
+        ref:
+          semver: << inputs.app.version | quote >>
+    - apiVersion: helm.toolkit.fluxcd.io/v2
+      kind: HelmRelease
+      metadata:
+        name: app1-<< inputs.tenant >>
+        namespace: apps
+      spec:
+        interval: 1h
+        releaseName: app1-<< inputs.tenant >>
+        chartRef:
+          kind: OCIRepository
+          name: app1-<< inputs.tenant >>
+        values:
+          replicaCount: << inputs.app.replicas | int >>
+```
+
+Each tenant's configuration lives in its own `ResourceSetInputProvider` with matching labels:
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSetInputProvider
+metadata:
+  name: app1-tenant1
+  namespace: apps
+  labels:
+    some: label
+    anotherLabel: value1
+spec:
+  type: Static
+  defaultValues:
+    tenant: "tenant1"
+    app:
+      version: "6.7.x"
+      replicas: 2
+---
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSetInputProvider
+metadata:
+  name: app1-tenant2
+  namespace: apps
+  labels:
+    some: label
+    anotherLabel: value2
+spec:
+  type: Static
+  defaultValues:
+    tenant: "tenant2"
+    app:
+      version: "6.6.x"
+      replicas: 3
+```
+
+<Note>
+  The `ResourceSet` and `ResourceSetInputProvider` resources must be in the same namespace.
+</Note>
+
+This pattern is particularly powerful for platform teams: onboarding a new tenant is as simple as creating a new `ResourceSetInputProvider` with the correct labels and default values. No changes to the central `ResourceSet` are required.
+
+## Multi-Cluster Example
+
+When deploying from a management cluster to multiple target clusters, the ResourceSet API simplifies per-environment customisation. The equivalent Kustomize structure requires overlays per environment:
+
+```text
+apps/
+└── app1
+    ├── base/
+    ├── overlays/
+    │   ├── dev/
+    │   └── production/
+    └── bundle/
+        └── kustomization.yaml
+```
+
+With a ResourceSet, the same multi-cluster deployment is expressed as a single file using `kubeConfig`:
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSet
+metadata:
+  name: app1
+  namespace: apps
+spec:
+  inputs:
+    - cluster: "dev"
+      branch: "main"
+      ingress: "app1.dev.example.com"
+    - cluster: "production"
+      branch: "prod"
+      ingress: "app1.example.com"
+  resources:
+    - apiVersion: source.toolkit.fluxcd.io/v1
+      kind: GitRepository
+      metadata:
+        name: app1-<< inputs.cluster >>
+        namespace: apps
+      spec:
+        interval: 5m
+        url: https://my.git/org/app1-deploy
+        ref:
+          branch: << inputs.branch >>
+    - apiVersion: kustomize.toolkit.fluxcd.io/v1
+      kind: Kustomization
+      metadata:
+        name: app1-<< inputs.cluster >>
+        namespace: apps
+      spec:
+        interval: 10m
+        prune: true
+        path: "./deploy"
+        sourceRef:
+          kind: GitRepository
+          name: app1-<< inputs.cluster >>
+        postBuild:
+          substitute:
+            domain: << inputs.ingress >>
+        kubeConfig:
+          secretRef:
+            name: << inputs.cluster >>-kubeconfig
+```
+
+Each Kustomization targets its own cluster by referencing the corresponding kubeconfig Secret, and the ingress domain is injected via Flux variable substitution.
+
+## Microservices with Dependency Chains
+
+When an application is composed of multiple microservices that must be deployed in order, the ResourceSet API can generate a Flux Kustomization per component with explicit `dependsOn` chains — driven by a `resourcesTemplate` with conditional logic:
+
+Given this monorepo structure:
+
+```text
+deploy/
+├── frontend/
+│   ├── deployment.yaml
+│   ├── ingress.yaml
+│   └── service.yaml
+├── backend/
+│   ├── deployment.yaml
+│   └── service.yaml
+└── database/
+    ├── deployment.yaml
+    ├── pvc.yaml
+    └── service.yaml
+```
+
+A single ResourceSet with a Go template generates the correct dependency chain:
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSet
+metadata:
+  name: app1
+  namespace: apps
+spec:
+  inputs:
+    - service: "frontend"
+      dependsOn: "backend"
+    - service: "backend"
+      dependsOn: "database"
+    - service: "database"
+      dependsOn: ""
+  resourcesTemplate: |
+    ---
+    apiVersion: source.toolkit.fluxcd.io/v1
+    kind: GitRepository
+    metadata:
+      name: app1
+      namespace: apps
+    spec:
+      interval: 5m
+      url: https://my.git/org/app1-deploy
+      ref:
+        branch: main
+    ---
+    apiVersion: kustomize.toolkit.fluxcd.io/v1
+    kind: Kustomization
+    metadata:
+      name: app1-<< inputs.service >>
+      namespace: apps
+    spec:
+      << if inputs.dependsOn >>
+      dependsOn:
+        - name: app1-<< inputs.dependsOn >>
+      << end >>
+      path: "./deploy/<< inputs.service >>"
+      interval: 30m
+      retryInterval: 5m
+      prune: true
+      wait: true
+      timeout: 5m
+      sourceRef:
+        kind: GitRepository
+        name: app1
+      postBuild:
+        substituteFrom:
+          - kind: ConfigMap
+            name: app1-vars
+```
+
+The `<< if inputs.dependsOn >>` block is omitted for the database service (which has no dependency), while the frontend and backend services each declare the correct `dependsOn` entry. The single shared `GitRepository` is deduplicated automatically by the ResourceSet controller when multiple inputs reference it with the same name.
+
+<Tip>
+  For automatically generating deployment pipelines for every app directory found in a monorepo, see the [Monorepo](/resourcesets/monorepo) guide, which uses the `ArtifactGenerator` and `ExternalArtifact` APIs instead of manual `inputs`.
+</Tip>
+
+## CLI Commands
+
+```shell
+# Build the ResourceSet locally and print the generated objects
+flux-operator build rset -f my-resourceset.yaml
+
+# List all ResourceSets in the cluster
+flux-operator get rset --all-namespaces
+
+# Reconcile a specific ResourceSet
+flux-operator -n apps reconcile rset app1
+
+# Suspend a ResourceSet
+flux-operator -n apps suspend rset app1
+
+# Resume a suspended ResourceSet
+flux-operator -n apps resume rset app1
+```

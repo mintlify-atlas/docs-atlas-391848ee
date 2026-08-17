@@ -1,0 +1,207 @@
+---
+title: "Install Flux Operator on Kubernetes"
+sidebarTitle: "Installation"
+description: "Step-by-step guide to installing Flux Operator on Kubernetes and OpenShift using Helm, Terraform, OLM, kubectl, or the CLI."
+---
+
+The Flux Operator is a statically compiled Go binary with no external dependencies, designed to run on Linux nodes (AMD64 or ARM64) across all major Kubernetes distributions. It can be installed through several methods — Helm, Terraform, Operator Lifecycle Manager (OLM), the `flux-operator` CLI, or `kubectl` — and is recommended to be deployed in a dedicated namespace such as `flux-system`.
+
+## Install Methods
+
+<Tabs>
+  <Tab title="Helm">
+    Helm is the recommended installation method for production environments. The Flux Operator Helm chart is published to GitHub Container Registry as an OCI artifact.
+
+    ```shell
+    helm install flux-operator oci://ghcr.io/controlplaneio-fluxcd/charts/flux-operator \
+      --namespace flux-system \
+      --create-namespace
+    ```
+
+    ### Helm Chart Values
+
+    The Helm chart exposes a rich set of values to customize the operator deployment. You can pass operator configuration flags via `extraArgs` and set environment variables for OLM-style deployments:
+
+    ```yaml
+    # values.yaml
+    extraArgs:
+      - --log-level=info
+      - --concurrent=10
+      - --reporting-interval=5m
+      - --watch-configs-label-selector=reconcile.fluxcd.io/watch=Enabled
+
+    resources:
+      limits:
+        cpu: 1000m
+        memory: 512Mi
+      requests:
+        cpu: 100m
+        memory: 64Mi
+
+    tolerations: []
+    affinity: {}
+    ```
+
+    Pass a custom values file at install time:
+
+    ```shell
+    helm install flux-operator oci://ghcr.io/controlplaneio-fluxcd/charts/flux-operator \
+      --namespace flux-system \
+      --create-namespace \
+      --values values.yaml
+    ```
+
+    <Tip>
+      To pin to a specific chart version, append `--version <semver>` to the install command. Automating upgrades via a Flux `HelmRelease` and `OCIRepository` is the recommended approach for production — see the [upgrade section](#upgrade) below.
+    </Tip>
+  </Tab>
+
+  <Tab title="Terraform">
+    The Flux Operator can be bootstrapped with Terraform using the official `flux-operator-bootstrap` module:
+
+    ```hcl
+    module "flux_operator_bootstrap" {
+      source  = "controlplaneio-fluxcd/flux-operator-bootstrap/kubernetes"
+
+      revision = var.bootstrap_revision
+
+      gitops_resources = {
+        instance_yaml = file("${path.root}/clusters/staging/flux-system/flux-instance.yaml")
+      }
+    }
+    ```
+
+    The module installs the operator and applies the `FluxInstance` manifest in a single step. For a full working example, see the [terraform example](https://github.com/controlplaneio-fluxcd/flux-operator/tree/main/config/terraform) in the project repository.
+  </Tab>
+
+  <Tab title="OLM / OperatorHub">
+    On OpenShift and OKD clusters, the Flux Operator can be installed through Operator Lifecycle Manager (OLM) from [operatorhub.io/operator/flux-operator](https://operatorhub.io/operator/flux-operator). It is also available in the [RedHat community operators production catalog](https://github.com/redhat-openshift-ecosystem/community-operators-prod).
+
+    Create a `Subscription` manifest to install the operator:
+
+    ```yaml
+    apiVersion: operators.coreos.com/v1alpha1
+    kind: Subscription
+    metadata:
+      name: flux-operator
+      namespace: flux-system
+    spec:
+      channel: stable
+      name: flux-operator
+      source: operatorhubio-catalog
+      sourceNamespace: olm
+      config:
+        env:
+          - name: DEFAULT_SERVICE_ACCOUNT
+            value: "flux-operator"
+          - name: REPORTING_INTERVAL
+            value: "30s"
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: role
+                      operator: In
+                      values:
+                        - flux
+        tolerations:
+          - effect: NoSchedule
+            key: role
+            operator: Equal
+            value: flux
+    ```
+
+    <Note>
+      Flux Operator supports several environment variables specifically for OLM installations, including `DEFAULT_SERVICE_ACCOUNT`, `REPORTING_INTERVAL`, `OVERRIDE_MANAGERS`, `WEB_SERVER_PORT`, and `WEB_CONFIG_SECRET_NAME`. These are set in the `Subscription` manifest under `config.env`.
+    </Note>
+  </Tab>
+
+  <Tab title="Flux Operator CLI">
+    The `flux-operator` CLI provides a single command to bootstrap a cluster with both the operator and a Flux instance in one step.
+
+    First, install the CLI with Homebrew:
+
+    ```shell
+    brew install controlplaneio-fluxcd/tap/flux-operator
+    ```
+
+    Then install the operator and Flux instance from a configuration file:
+
+    ```shell
+    flux-operator install -f flux-instance.yaml
+    ```
+
+    The install command:
+    1. Downloads the Flux Operator distribution artifact from `oci://ghcr.io/controlplaneio-fluxcd/flux-operator-manifests`
+    2. Installs the operator in the `flux-system` namespace and waits for readiness
+    3. Applies the Flux instance according to the provided configuration
+    4. Optionally configures pull secrets and sync source credentials
+    5. Optionally enables automatic operator updates from the distribution artifact
+
+    <Note>
+      The CLI install command is intended for development and testing. For production environments, use Helm or Terraform.
+    </Note>
+  </Tab>
+
+  <Tab title="kubectl">
+    For quick development or testing setups, apply the release manifest directly with `kubectl`:
+
+    ```shell
+    kubectl apply -f https://github.com/controlplaneio-fluxcd/flux-operator/releases/latest/download/install.yaml
+    ```
+
+    <Warning>
+      This method is intended for development and testing only. In production environments, use Helm or Terraform so that upgrades, rollbacks, and configuration changes are managed declaratively.
+    </Warning>
+  </Tab>
+</Tabs>
+
+## Upgrade
+
+The recommended way to upgrade the Flux Operator is via GitOps — managing the operator's installation with a Flux `HelmRelease` backed by an `OCIRepository` source. This allows upgrades to be triggered automatically when a new Helm chart version is published without any manual intervention.
+
+A complete example using a `ResourceSet` to manage both the `OCIRepository` and `HelmRelease` is provided in the [migration guide](/guides/migration#automating-flux-operator-upgrades).
+
+## Uninstall
+
+The safest way to remove the Flux Operator and Flux controllers is with the CLI's `uninstall` command:
+
+```shell
+flux-operator -n flux-system uninstall --keep-namespace
+```
+
+<Steps>
+  <Step title="What uninstall does">
+    The command executes the following steps in order:
+    1. Deletes the cluster role bindings of the Flux Operator and Flux controllers
+    2. Deletes the deployments of the Flux Operator and Flux controllers
+    3. Removes finalizers from Flux Operator and Flux custom resources
+    4. Deletes the CustomResourceDefinitions of the Flux Operator and Flux
+    5. Deletes the namespace (unless `--keep-namespace` is passed)
+  </Step>
+  <Step title="What uninstall preserves">
+    The `uninstall` command does **not** delete any Kubernetes objects or Helm releases that were previously reconciled by Flux. It is safe to run this command and re-install the operator later to resume managing the existing resources.
+  </Step>
+</Steps>
+
+## Operator Configuration Reference
+
+The Flux Operator supports a comprehensive set of flags and environment variables. Flags are passed to the operator container via the Helm chart's `extraArgs` values key.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--concurrent` | `10` | Number of concurrent resource reconciles |
+| `--log-level` | `info` | Log verbosity: `trace`, `debug`, `info`, `error` |
+| `--log-encoding` | `json` | Log encoding format: `json` or `console` |
+| `--reporting-interval` | `5m` | Interval at which the Flux report is computed |
+| `--watch-configs-label-selector` | `reconcile.fluxcd.io/watch=Enabled` | Watch ConfigMaps and Secrets with matching labels |
+| `--default-service-account` | | Default service account for impersonation |
+| `--metrics-addr` | `:8080` | Address the metrics endpoint binds to |
+| `--health-addr` | `:8081` | Address the health endpoint binds to |
+| `--web-server-port` | `9080` | Port for the web server (`0` to disable) |
+| `--min-retry-delay` | `750ms` | Minimum wait time before retrying a reconciliation |
+| `--max-retry-delay` | `15m` | Maximum wait time before retrying a reconciliation |
+| `--storage-path` | `/data` | Local storage path |
+| `--token-cache-max-size` | `100` | Maximum number of tokens in the cache |
+| `--token-cache-max-duration` | `1h` | Maximum duration a token is cached |

@@ -1,0 +1,265 @@
+---
+title: "Deliver Safely with Time-Based Deployment Windows"
+sidebarTitle: "Deployment Windows"
+description: "Configure cron-based deployment schedules on ResourceSetInputProvider to restrict production rollouts to approved time windows and meet compliance requirements."
+---
+
+In regulated industries, deploying software changes requires strict controls over when changes reach production. Teams must demonstrate compliance with change management policies, ensure sufficient staff coverage during deployments, and avoid impacting peak business operations. The Flux Operator's time-based delivery feature addresses these requirements by letting you attach cron-based schedules to a `ResourceSetInputProvider` — the provider only exports new inputs (and therefore only triggers deployments) during the configured windows.
+
+## How It Works
+
+Instead of using a Flux `GitRepository` and `Kustomization` directly, the recommended pattern for time-gated deployments generates those resources dynamically with a `ResourceSet`. The `ResourceSetInputProvider` is responsible for fetching the latest commit SHA (or OCI tag) from the source on its schedule. By pinning the `GitRepository` to a specific commit SHA exported by the provider, changes are only picked up at the defined reconciliation windows:
+
+1. **Define a `ResourceSetInputProvider`** with a `spec.schedule` that controls when it checks for new versions.
+2. **Configure a `ResourceSet`** that uses the provider's exported `sha` (or `tag`) to pin the source reference.
+3. **Deploy**: when the provider runs within its window and finds a new version, the `ResourceSet` reconciles and the deployment occurs. Outside the window, the exported inputs — and therefore the deployed version — remain frozen.
+
+## Schedule Configuration
+
+The `spec.schedule` field on `ResourceSetInputProvider` accepts a list of cron entries. Each entry has three fields:
+
+| Field | Description |
+|---|---|
+| `cron` | Standard five-field cron expression (minute, hour, day-of-month, month, day-of-week) |
+| `timeZone` | IANA time zone name (e.g., `Europe/London`, `America/New_York`). Defaults to `UTC` |
+| `window` | Duration string during which reconciliation is allowed after the scheduled start time (e.g., `6h`, `30m`). Must be `0s` or at least twice the reconciliation timeout |
+
+### Standard Deployment Window
+
+Allow deployments from 08:00 to 16:00 on weekdays in London time:
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSetInputProvider
+metadata:
+  name: my-app-main
+  namespace: apps
+  labels:
+    app.kubernetes.io/name: my-app
+  annotations:
+    fluxcd.controlplane.io/reconcileEvery: "10m"
+    fluxcd.controlplane.io/reconcileTimeout: "1m"
+spec:
+  schedule:
+    - cron: "0 8 * * 1-5"
+      timeZone: "Europe/London"
+      window: 8h
+  type: GitHubBranch # or GitLabBranch / AzureDevOpsBranch
+  url: https://github.com/my-org/my-app
+  secretRef:
+    name: gh-app-auth
+  filter:
+    includeBranch: "^main$"
+  defaultValues:
+    env: "production"
+```
+
+Within the 08:00–16:00 window, the provider reconciles every 10 minutes (`reconcileEvery`). Outside the window, reconciliation is skipped and the exported inputs — including the commit SHA — remain unchanged.
+
+### Zero-Duration Window (Point-in-Time)
+
+For a single reconciliation at exactly the scheduled time:
+
+```yaml
+spec:
+  schedule:
+    - cron: "0 8 * * 1-5"
+      timeZone: "UTC"
+      window: "0s"
+```
+
+- At creation time, the provider executes immediately, ignoring the schedule.
+- Any change to the provider object triggers an immediate reconciliation, even outside the window.
+- At 08:00 UTC on weekdays, the provider runs once and exports the latest version.
+
+### Multiple Schedules
+
+Use multiple entries to support different windows across time zones or days:
+
+```yaml
+spec:
+  schedule:
+    # Monday through Thursday, 10:00–16:00 New York time
+    - cron: "0 10 * * 1-4"
+      timeZone: "America/New_York"
+      window: "6h"
+    # Fridays, 10:00–13:00 London time
+    - cron: "0 10 * * 5"
+      timeZone: "Europe/London"
+      window: "3h"
+```
+
+The provider reconciles if **any** schedule matches the current time. The next scheduled time is the **earliest** upcoming entry across all schedules.
+
+## Deploying from a Git Branch
+
+Pin a `GitRepository` to a specific commit SHA to ensure the cluster only deploys what the provider exported during its last allowed window:
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSet
+metadata:
+  name: my-app
+  namespace: apps
+spec:
+  inputsFrom:
+    - kind: ResourceSetInputProvider
+      selector:
+        matchLabels:
+          app.kubernetes.io/name: my-app
+  resources:
+    - apiVersion: source.toolkit.fluxcd.io/v1
+      kind: GitRepository
+      metadata:
+        name: my-app
+        namespace: << inputs.provider.namespace >>
+      spec:
+        interval: 12h
+        url: https://github.com/my-org/my-app
+        ref:
+          commit: << inputs.sha >>
+        secretRef:
+          name: gh-auth
+        sparseCheckout:
+          - deploy
+    - apiVersion: kustomize.toolkit.fluxcd.io/v1
+      kind: Kustomization
+      metadata:
+        name: my-app
+        namespace: << inputs.provider.namespace >>
+      spec:
+        interval: 30m
+        retryInterval: 5m
+        prune: true
+        wait: true
+        timeout: 5m
+        sourceRef:
+          kind: GitRepository
+          name: my-app
+        path: deploy/<< inputs.env >>
+```
+
+The `GitRepository` uses `spec.ref.commit` rather than a branch or tag, so it is immutably pinned to the SHA that the provider last exported. Even if someone pushes to `main` outside the deployment window, the cluster will not pick up the new commit until the provider runs again during a permitted window.
+
+For Git tags instead of branches, use a `GitHubTag` (or `GitLabTag` / `AzureDevOpsTag`) provider with a semver filter:
+
+```yaml
+spec:
+  schedule:
+    - cron: "0 8 * * 1-5"
+      timeZone: "Europe/London"
+      window: 8h
+  type: GitHubTag
+  url: https://github.com/my-org/my-app
+  secretRef:
+    name: gh-auth
+  filter:
+    semver: ">=1.0.0"
+    limit: 1
+```
+
+## Helm Release Workflow
+
+For Helm-packaged applications stored as OCI artifacts:
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSetInputProvider
+metadata:
+  name: podinfo-release
+  namespace: apps
+  labels:
+    app.kubernetes.io/name: podinfo
+  annotations:
+    fluxcd.controlplane.io/reconcileEvery: "10m"
+    fluxcd.controlplane.io/reconcileTimeout: "1m"
+spec:
+  schedule:
+    - cron: "0 12 * * 1-5"
+      timeZone: "UTC"
+  type: OCIArtifactTag
+  url: oci://ghcr.io/stefanprodan/charts/podinfo
+  filter:
+    semver: ">=1.0.0"
+    limit: 1
+```
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSet
+metadata:
+  name: podinfo
+  namespace: apps
+spec:
+  inputsFrom:
+    - kind: ResourceSetInputProvider
+      selector:
+        matchLabels:
+          app.kubernetes.io/name: podinfo
+  resources:
+    - apiVersion: source.toolkit.fluxcd.io/v1
+      kind: OCIRepository
+      metadata:
+        name: podinfo
+        namespace: << inputs.provider.namespace >>
+      spec:
+        interval: 10m
+        url: oci://ghcr.io/stefanprodan/charts/podinfo
+        ref:
+          tag: << inputs.tag >>
+    - apiVersion: helm.toolkit.fluxcd.io/v2
+      kind: HelmRelease
+      metadata:
+        name: podinfo
+        namespace: << inputs.provider.namespace >>
+      spec:
+        interval: 30m
+        releaseName: podinfo
+        chartRef:
+          kind: OCIRepository
+          name: podinfo
+        values:
+          replicaCount: 2
+```
+
+<Tip>
+  The Flux Operator supports OIDC-based authentication for Amazon ECR, Azure ACR, and Google GAR. Use the provider-specific types (`ECRArtifactTag`, `ACRArtifactTag`, `GARArtifactTag`) to authenticate without a Kubernetes Secret.
+</Tip>
+
+## Forcing Out-of-Schedule Reconciliation
+
+To manually trigger a reconciliation outside the defined schedule — for example, to apply an emergency fix — use the `--force` flag with the CLI:
+
+```shell
+flux-operator reconcile rsip my-app-main --namespace apps --force
+```
+
+## CLI Operations
+
+```shell
+# View all input providers including their next scheduled time
+flux-operator get rsip --all-namespaces
+
+# Force a reconciliation outside the defined schedule
+flux-operator reconcile rsip my-app-main --namespace apps --force
+
+# Suspend a provider to prevent it from reconciling at all
+flux-operator suspend rsip my-app-main --namespace apps
+
+# Resume a suspended provider
+flux-operator resume rsip my-app-main --namespace apps
+```
+
+## Cron Expression Reference
+
+```
+┌───────────── minute (0 - 59)
+│ ┌───────────── hour (0 - 23)
+│ │ ┌───────────── day of month (1 - 31)
+│ │ │ ┌───────────── month (1 - 12)
+│ │ │ │ ┌───────────── day of week (0 - 6) (Sunday to Saturday)
+│ │ │ │ │
+* * * * *
+```
+
+Use [crontab.guru](https://crontab.guru/) to generate and validate cron expressions. Time zones must use [IANA time zone names](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) such as `UTC`, `Europe/London`, or `America/New_York`.

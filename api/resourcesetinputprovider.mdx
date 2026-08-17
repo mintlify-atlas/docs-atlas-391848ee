@@ -1,0 +1,555 @@
+---
+title: "ResourceSetInputProvider API Reference"
+sidebarTitle: "InputProvider"
+description: "Complete API reference for the ResourceSetInputProvider CRD — fetch dynamic inputs from GitHub, GitLab, Azure DevOps, OCI registries, and more for use in ResourceSets."
+---
+
+The **ResourceSetInputProvider** (`rsip`) custom resource is a declarative API for generating a set of input values consumed by [ResourceSet](/api/resourceset) definitions. It polls an external source — a Git hosting service, container registry, HTTP API, or an in-cluster `ExternalArtifact` — and exports a structured list of inputs that the ResourceSet templating engine can reference as `<< inputs.* >>`.
+
+A single `ResourceSetInputProvider` maps to one upstream data source. Multiple providers can feed a single ResourceSet, enabling powerful composition patterns such as "deploy every open PR against every available tag."
+
+## Example
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSetInputProvider
+metadata:
+  name: flux-appx-prs
+  namespace: default
+  annotations:
+    fluxcd.controlplane.io/reconcile: "enabled"
+    fluxcd.controlplane.io/reconcileEvery: "5m"
+    fluxcd.controlplane.io/reconcileTimeout: "2m"
+spec:
+  type: GitHubPullRequest
+  url: https://github.com/controlplaneio-fluxcd/flux-appx
+  filter:
+    labels:
+      - "deploy/flux-preview"
+    limit: 10
+  secretRef:
+    name: github-pat
+  defaultValues:
+    chart: "charts/flux-appx"
+```
+
+## Quick start
+
+```shell
+# Apply the provider
+kubectl apply -f flux-appx-prs.yaml
+
+# Wait for first reconciliation
+kubectl wait rsip/flux-appx-prs --for=condition=ready --timeout=5m
+
+# Inspect exported inputs
+kubectl get rsip/flux-appx-prs -o yaml | yq .status.exportedInputs
+
+# Delete the provider
+kubectl delete rsip/flux-appx-prs
+```
+
+---
+
+## Provider types
+
+### `spec.type`
+
+<ParamField body="type" type="string" required>
+  The kind of upstream data source to poll. Must be one of the values in the table below.
+</ParamField>
+
+#### Static
+
+| Type | Description | Exported fields |
+|---|---|---|
+| `Static` | Exports `spec.defaultValues` as a single input set. No external call is made. | `id` (Adler-32 of provider UID) + all `defaultValues` keys |
+
+#### Git — GitHub
+
+| Type | Description | Exported fields |
+|---|---|---|
+| `GitHubPullRequest` | Open pull requests in a GitHub repository. | `id`, `sha`, `branch`, `author`, `title` |
+| `GitHubBranch` | Branches in a GitHub repository. | `id`, `branch`, `sha` |
+| `GitHubTag` | Tags in a GitHub repository. | `id`, `tag`, `sha` |
+
+#### Git — GitLab
+
+| Type | Description | Exported fields |
+|---|---|---|
+| `GitLabMergeRequest` | Open merge requests in a GitLab project. | `id`, `sha`, `branch`, `author`, `title` |
+| `GitLabBranch` | Branches in a GitLab project. | `id`, `branch`, `sha` |
+| `GitLabTag` | Tags in a GitLab project. | `id`, `tag`, `sha` |
+| `GitLabEnvironment` | Deployed GitLab Environments. | `id`, `sha`, `branch`, `author`, `title`, `slug` |
+
+#### Git — Azure DevOps
+
+| Type | Description | Exported fields | Auth |
+|---|---|---|---|
+| `AzureDevOpsPullRequest` | Open pull requests in an Azure DevOps repository. | `id`, `sha`, `branch`, `author`, `title` | Secret or workload identity |
+| `AzureDevOpsBranch` | Branches in an Azure DevOps repository. | `id`, `branch`, `sha` | Secret or workload identity |
+| `AzureDevOpsTag` | Tags in an Azure DevOps repository. | `id`, `tag`, `sha` | Secret or workload identity |
+
+#### Git — AWS CodeCommit
+
+| Type | Description | Exported fields | Auth |
+|---|---|---|---|
+| `AWSCodeCommitPullRequest` | Open pull requests in an AWS CodeCommit repository. | `id`, `sha`, `branch`, `author`, `title` | Workload identity only |
+| `AWSCodeCommitBranch` | Branches in an AWS CodeCommit repository. | `id`, `branch`, `sha` | Workload identity only |
+| `AWSCodeCommitTag` | Tags in an AWS CodeCommit repository. | `id`, `tag`, `sha` | Workload identity only |
+
+#### Git — Gitea / Forgejo
+
+| Type | Description | Exported fields |
+|---|---|---|
+| `GiteaPullRequest` | Open pull requests in a Gitea or Forgejo repository. | `id`, `sha`, `branch`, `author`, `title` |
+| `GiteaBranch` | Branches in a Gitea or Forgejo repository. | `id`, `branch`, `sha` |
+| `GiteaTag` | Tags in a Gitea or Forgejo repository. | `id`, `tag`, `sha` |
+
+#### OCI registries
+
+| Type | Description | Exported fields | Auth |
+|---|---|---|---|
+| `OCIArtifactTag` | Tags from any OCI-compliant container registry. | `id`, `tag`, `digest` | Secret (Docker config JSON) |
+| `ACRArtifactTag` | Tags from Azure Container Registry. | `id`, `tag`, `digest` | Workload identity |
+| `ECRArtifactTag` | Tags from Amazon Elastic Container Registry. | `id`, `tag`, `digest` | Workload identity |
+| `GARArtifactTag` | Tags from Google Artifact Registry. | `id`, `tag`, `digest` | Workload identity |
+
+#### External
+
+| Type | Description | Exported fields |
+|---|---|---|
+| `ExternalService` | HTTP/S orchestrator API that returns a JSON `inputs` array. | User-defined; must include `id` string field |
+| `ExternalArtifact` | In-cluster `ExternalArtifact` custom resources discovered by label selectors. | `id`, `name`, `namespace`, `revision` + all resource labels |
+
+---
+
+## Exported input field reference
+
+All input sets include `defaultValues` merged in (provider values take precedence). Field types are always strings.
+
+### Change requests (PR / MR)
+
+| Field | Description |
+|---|---|
+| `id` | Numeric ID of the change request. |
+| `sha` | HEAD commit SHA. |
+| `branch` | Source branch name. |
+| `author` | Username of the author. |
+| `title` | Pull/merge request title. |
+
+### Branches
+
+| Field | Description |
+|---|---|
+| `id` | Adler-32 checksum of the branch name. |
+| `branch` | Branch name. |
+| `sha` | Commit SHA at HEAD. |
+
+### Tags
+
+| Field | Description |
+|---|---|
+| `id` | Adler-32 checksum of the tag name. |
+| `tag` | Tag name. |
+| `sha` | Commit SHA corresponding to the tag. |
+
+### GitLab Environments
+
+| Field | Description |
+|---|---|
+| `id` | Environment numeric ID. |
+| `sha` | Commit SHA of the last deployment. |
+| `branch` | Branch associated with the last deployment. |
+| `author` | Author of the associated commit. |
+| `title` | Environment name. |
+| `slug` | Normalized environment name (no special characters). |
+
+### OCI artifact tags (OCIArtifactTag / ACR / ECR / GAR)
+
+| Field | Description |
+|---|---|
+| `id` | Adler-32 checksum of the tag name. |
+| `tag` | Tag name. |
+| `digest` | Image digest in the format `sha256:<hash>`. |
+
+### ExternalArtifact
+
+| Field | Description |
+|---|---|
+| `id` | Adler-32 of `<namespace>/<name>`. |
+| `name` | `ExternalArtifact` metadata name. |
+| `namespace` | `ExternalArtifact` namespace. |
+| `revision` | `.status.artifact.revision` from the `ExternalArtifact` (optional). |
+| _(label keys)_ | All labels from the matched `ExternalArtifact` are exported as flat key-value pairs. |
+
+### ExternalService
+
+User-defined. The API must return:
+
+```json
+{
+  "inputs": [
+    { "id": "1", "tenant": "tenant1", "version": "2.0.0-rc.1" }
+  ]
+}
+```
+
+The `id` field (string) is required and must be unique within the array. Response body must not exceed 900 KiB.
+
+---
+
+## Spec fields
+
+### `spec.url`
+
+<ParamField body="url" type="string">
+  HTTP/S or OCI address of the upstream source. Required for all types except `Static` and `ExternalArtifact`.
+
+  - Git providers: `https://github.com/<org>/<repo>`
+  - OCI providers: `oci://<registry>/<repository>`
+  - `ExternalService`: `https://my-api.example.com/inputs`
+</ParamField>
+
+### `spec.insecure`
+
+<ParamField body="insecure" type="boolean" default="false">
+  Allows plain HTTP connections. Only valid for `OCIArtifactTag` and `ExternalService` types. When set to `true` for `ExternalService`, the URL may use `http://`.
+</ParamField>
+
+---
+
+### `spec.filter`
+
+<ParamField body="filter.limit" type="integer" default="100">
+  Maximum number of input sets to return. Accepted range: 1–10 000.
+</ParamField>
+
+<ParamField body="filter.labels" type="string[]">
+  Filter change requests by one or more labels. All listed labels must be present.
+</ParamField>
+
+<ParamField body="filter.includeBranch" type="string">
+  Regular expression — only branches whose name matches are included.
+</ParamField>
+
+<ParamField body="filter.excludeBranch" type="string">
+  Regular expression — branches whose name matches are excluded.
+</ParamField>
+
+<ParamField body="filter.includeTag" type="string">
+  Regular expression — only tags whose name matches are included.
+
+  ```yaml
+  spec:
+    filter:
+      includeTag: "^v[0-9]+\\.[0-9]+\\.[0-9]+$"  # e.g. v1.2.3
+      excludeTag: "^v0"                            # exclude v0.x.y
+  ```
+</ParamField>
+
+<ParamField body="filter.excludeTag" type="string">
+  Regular expression — tags whose name matches are excluded.
+</ParamField>
+
+<ParamField body="filter.includeEnvironment" type="string">
+  Regular expression — only GitLab environments whose name matches are included.
+</ParamField>
+
+<ParamField body="filter.excludeEnvironment" type="string">
+  Regular expression — GitLab environments whose name matches are excluded.
+</ParamField>
+
+<ParamField body="filter.semver" type="string">
+  Semver range to filter and sort tags, e.g. `">=1.0.0"`. When set, tags are ordered by semver descending. Combine with `limit: 1` to always get the latest stable tag.
+
+  ```yaml
+  spec:
+    filter:
+      limit: 1
+      semver: ">=1.0.0"
+  ```
+</ParamField>
+
+---
+
+### `spec.skip`
+
+<ParamField body="skip.labels" type="string[]">
+  List of label conditions. If **any** condition matches the change request, the current provider response is skipped (the last known good state is preserved). Prefix a label with `!` to skip when the label is **absent**.
+
+  ```yaml
+  spec:
+    filter:
+      labels:
+        - "deploy/flux-preview"
+    skip:
+      labels:
+        - "deploy/flux-preview-pause"   # skip if this label is present
+        - "!test-build-push/passed"      # skip if this label is absent
+  ```
+</ParamField>
+
+---
+
+### `spec.defaultValues`
+
+<ParamField body="defaultValues" type="map[string]any">
+  Key-value pairs merged into every exported input set. Provider values take precedence over defaults. Supports nested objects and arrays.
+
+  ```yaml
+  spec:
+    defaultValues:
+      env: "staging"
+      registry: "ghcr.io/my-org"
+  ```
+</ParamField>
+
+---
+
+### `spec.secretRef`
+
+<ParamField body="secretRef.name" type="string">
+  Name of a Secret in the same namespace containing authentication credentials.
+
+  - **Git providers** — `username` + `password` (personal access token) keys.
+  - **OCIArtifactTag** — `kubernetes.io/dockerconfigjson` secret.
+  - **ExternalService** — `token` (bearer) or `username` + `password` (basic auth) keys.
+
+  Not supported for: `Static`, `ExternalArtifact`, `AWSCodeCommit*`, `ACRArtifactTag`, `ECRArtifactTag`, `GARArtifactTag`.
+
+  ```yaml
+  apiVersion: v1
+  kind: Secret
+  metadata:
+    name: github-pat
+    namespace: default
+  stringData:
+    username: flux
+    password: <GITHUB PAT>
+  ```
+</ParamField>
+
+#### GitHub App authentication
+
+Instead of a personal access token, GitHub providers accept a GitHub App secret:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: github-app
+  namespace: default
+stringData:
+  githubAppID: "123456"
+  githubAppInstallationOwner: "my-org"      # OR githubAppInstallationID
+  githubAppPrivateKey: |
+    -----BEGIN RSA PRIVATE KEY-----
+    ...
+    -----END RSA PRIVATE KEY-----
+  githubAppBaseURL: https://github.example.com/api/v3  # optional, for GitHub Enterprise
+```
+
+Exactly one of `githubAppInstallationOwner` or `githubAppInstallationID` must be provided.
+
+---
+
+### `spec.serviceAccountName`
+
+<ParamField body="serviceAccountName" type="string">
+  Kubernetes `ServiceAccount` configured with workload identity (AWS IRSA, Azure Workload Identity, GCP Workload Identity) or image pull secrets.
+
+  Supported provider types for workload identity:
+  `AzureDevOps*`, `AWSCodeCommit*`, `ACRArtifactTag`, `ECRArtifactTag`, `GARArtifactTag`, `ExternalArtifact`.
+
+  For `OCIArtifactTag`, image pull secrets from the ServiceAccount are added to the registry keychain alongside `spec.secretRef`.
+
+  When omitted, the operator's own pod identity (controller-level workload identity) is used for cloud providers.
+</ParamField>
+
+---
+
+### `spec.certSecretRef`
+
+<ParamField body="certSecretRef.name" type="string">
+  Name of a Secret containing custom TLS certificates for Git, OCI, or ExternalService providers using self-signed certificates or mTLS.
+
+  | Secret key | Purpose |
+  |---|---|
+  | `ca.crt` | PEM-encoded CA certificate for trust chain validation |
+  | `tls.crt` | PEM-encoded client certificate for mTLS (OCI only) |
+  | `tls.key` | PEM-encoded private key for mTLS (OCI only) |
+
+  Not supported for: `Static`, `ExternalArtifact`, `AzureDevOps*`, `AWSCodeCommit*`, `ACRArtifactTag`, `ECRArtifactTag`, `GARArtifactTag`.
+</ParamField>
+
+---
+
+### `spec.selectors`
+
+<ParamField body="selectors" type="ExternalArtifactSelector[]">
+  Required when `spec.type` is `ExternalArtifact`. Defines how to discover `ExternalArtifact` custom resources in the cluster. Must not be set for any other provider type.
+
+  <Expandable title="ExternalArtifactSelector fields">
+
+  <ParamField body="matchLabels" type="map[string]string">
+    Standard Kubernetes label selector.
+  </ParamField>
+
+  <ParamField body="matchExpressions" type="LabelSelectorRequirement[]">
+    Standard Kubernetes label expression selector.
+  </ParamField>
+
+  <ParamField body="name" type="string">
+    Select a single `ExternalArtifact` by metadata name. Mutually exclusive with `matchLabels` and `matchExpressions`.
+  </ParamField>
+
+  <ParamField body="namespace" type="string">
+    Scope of discovery. Empty = same namespace as provider. `"*"` = all namespaces (requires cluster-wide RBAC). Any other value = that specific namespace.
+  </ParamField>
+
+  </Expandable>
+
+  ```yaml
+  spec:
+    type: ExternalArtifact
+    selectors:
+      - matchLabels:
+          env: dev
+      - namespace: apps
+        matchExpressions:
+          - key: team
+            operator: In
+            values: [platform, backend]
+      - namespace: "*"
+        matchLabels:
+          generated-by: source-watcher
+  ```
+
+  <Warning>
+  Using `namespace: "*"` requires the ServiceAccount (specified in `spec.serviceAccountName` or the operator's default) to have cluster-wide `list` permission on `ExternalArtifact` resources.
+  </Warning>
+</ParamField>
+
+---
+
+### `spec.schedule`
+
+Optional list of time windows during which the provider is allowed to reconcile. When no schedule is defined, the provider reconciles freely according to the `reconcileEvery` annotation.
+
+<ParamField body="schedule[].cron" type="string" required>
+  Cron expression in standard five-field format, e.g. `"0 10 * * 1-5"`. Use [crontab.guru](https://crontab.guru) to validate expressions.
+</ParamField>
+
+<ParamField body="schedule[].timeZone" type="string" default="UTC">
+  IANA time zone name, e.g. `"Europe/London"`. See the [tz database](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones).
+</ParamField>
+
+<ParamField body="schedule[].window" type="string" default="0s">
+  Duration of the reconciliation window as a Go duration, e.g. `"6h"`. The window must be either zero or at least twice the reconciliation timeout. A zero-duration window means the provider will reconcile at the scheduled instant with best-effort timing.
+</ParamField>
+
+**Multiple schedules example** — work hours only:
+
+```yaml
+spec:
+  schedule:
+    # Monday–Thursday, 10:00–16:00 London time
+    - cron: "0 10 * * 1-4"
+      timeZone: "Europe/London"
+      window: "6h"
+    # Friday, 10:00–13:00 London time
+    - cron: "0 10 * * 5"
+      timeZone: "Europe/London"
+      window: "3h"
+```
+
+**Multiple schedule behavior:**
+
+- Reconciliation is allowed if **any** schedule currently matches.
+- The **earliest** next scheduled time across all schedules determines when the provider next runs.
+- To force an out-of-schedule reconciliation, annotate with both `reconcile.fluxcd.io/requestedAt` and `reconcile.fluxcd.io/forceAt` set to the same timestamp, or use the CLI:
+
+```shell
+flux-operator reconcile inputprovider <name> --force
+```
+
+---
+
+## Reconciliation annotations
+
+| Annotation | Default | Description |
+|---|---|---|
+| `fluxcd.controlplane.io/reconcile` | `enabled` | Set to `disabled` to pause reconciliation. |
+| `fluxcd.controlplane.io/reconcileEvery` | `10m` | Polling interval for the external service. |
+| `fluxcd.controlplane.io/reconcileTimeout` | `2m` | Timeout for each external service call. |
+| `reconcile.fluxcd.io/requestedAt` | — | Set to current timestamp to trigger immediate reconciliation. |
+| `reconcile.fluxcd.io/forceAt` | — | Must equal `requestedAt` to force out-of-schedule reconciliation. |
+
+---
+
+## Status
+
+### Conditions
+
+| Type | Status | Reason | Meaning |
+|---|---|---|---|
+| `Ready` | `True` | `ReconciliationSucceeded` | Inputs fetched and exported successfully. |
+| `Ready` | `False` | `ReconciliationFailed` | External service call failed. |
+| `Reconciling` | `True` | `Progressing`, `ProgressingWithRetry` | Fetching data from the external service. |
+| `Stalled` | `True` | `InvalidDefaultValues` | `spec.defaultValues` is invalid. |
+| `Stalled` | `True` | `InvalidSchedule` | `spec.schedule` configuration is invalid. |
+| `Stalled` | `True` | `InvalidExportedInputs` | (`Static` only) default values cannot be exported as inputs. |
+
+### `status.exportedInputs`
+
+List of input maps produced by the last successful reconciliation. Referenced by any `ResourceSet` with this provider in its `spec.inputsFrom`.
+
+```yaml
+status:
+  exportedInputs:
+    - author: stefanprodan
+      branch: feat/ui-footer
+      id: "3"
+      sha: 8492c0b5b2094fe720776c8ace1b9690ff258f53
+      title: "feat(ui): Add footer"
+    - id: "48955639"
+      tag: "6.0.4"
+      sha: 11cf36d83818e64aaa60d523ab6438258ebb6009
+```
+
+### `status.lastExportedRevision`
+
+SHA256 digest of the last successfully exported inputs, used for change detection.
+
+### `status.nextSchedule`
+
+Present only when the provider is between schedule windows. Shows when the next reconciliation is expected.
+
+```yaml
+status:
+  nextSchedule:
+    cron: "0 8 * * 1-5"
+    timeZone: "Europe/London"
+    when: "2025-06-29T08:00:00Z"
+    window: "8h"
+```
+
+---
+
+## Prometheus metric
+
+```
+flux_resourcesetinputprovider_info{uid, kind, name, exported_namespace, ready, reason, suspended, url}
+```
+
+| Label | Example |
+|---|---|
+| `uid` | Kubernetes UID of the provider |
+| `kind` | `ResourceSetInputProvider` |
+| `name` | `flux-appx-prs` |
+| `exported_namespace` | `default` |
+| `ready` | `True` |
+| `reason` | `ReconciliationSucceeded` |
+| `suspended` | `False` |
+| `url` | `https://github.com/controlplaneio-fluxcd/flux-appx` |

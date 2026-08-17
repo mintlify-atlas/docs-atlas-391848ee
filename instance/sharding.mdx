@@ -1,0 +1,324 @@
+---
+title: "Scale Flux with Controller Sharding"
+sidebarTitle: "Sharding"
+description: "Horizontally scale Flux by distributing reconciliation across multiple controller shards, with optional persistent storage per shard and per-tenant isolation strategies."
+---
+
+The Flux Operator supports sharding the reconciliation workload across multiple sets of Flux controllers, enabling horizontal scaling beyond what a single controller replica can handle. Each shard runs a dedicated copy of the relevant controllers and watches only the Flux resources that carry a matching shard label. This makes sharding equally useful for raw throughput as it is for isolating reconciliation between different teams or environments.
+
+## Sharding Configuration
+
+Enable sharding by adding a `spec.sharding` block to the `FluxInstance`. The `key` field sets the label name used to route resources to shards, and `shards` lists the shard identifiers:
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: FluxInstance
+metadata:
+  name: flux
+  namespace: flux-system
+spec:
+  distribution:
+    version: "2.8.x"
+    registry: "ghcr.io/fluxcd"
+  cluster:
+    size: large
+  sharding:
+    key: "sharding.fluxcd.io/key"
+    shards:
+      - "shard1"
+      - "shard2"
+```
+
+The operator creates a complete, independent set of controllers for every shard listed. Controllers that support watch label selectors are sharded: `source-controller`, `kustomize-controller`, `helm-controller`, `image-reflector-controller`, `image-automation-controller`, and (with Flux v2.9.0 or later) `source-watcher`.
+
+After applying the configuration, verify the deployments:
+
+```console
+$ kubectl -n flux-system get deploy -l app.kubernetes.io/part-of=flux
+NAME                          READY   UP-TO-DATE   AVAILABLE   AGE
+helm-controller               1/1     1            1           77s
+helm-controller-shard1        1/1     1            1           77s
+helm-controller-shard2        1/1     1            1           77s
+kustomize-controller          1/1     1            1           77s
+kustomize-controller-shard1   1/1     1            1           77s
+kustomize-controller-shard2   1/1     1            1           77s
+notification-controller       1/1     1            1           77s
+source-controller             1/1     1            1           77s
+source-controller-shard1      1/1     1            1           77s
+source-controller-shard2      1/1     1            1           77s
+```
+
+<Note>
+Use the main (un-sharded) controller instances to reconcile cluster add-ons and platform infrastructure. Reserve the sharded controllers for tenant application workloads.
+</Note>
+
+## Persistent Storage per Shard
+
+Enabling persistent storage for `source-controller` reduces re-download overhead after a restart because each shard retains its cached artifacts across pod restarts. To enable persistent storage for all source-controller shards, set `spec.sharding.storage: persistent` **and** provide a `spec.storage` block — the Kubernetes admission webhook rejects configurations that set one without the other:
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: FluxInstance
+metadata:
+  name: flux
+  namespace: flux-system
+spec:
+  distribution:
+    version: "2.8.x"
+    registry: "ghcr.io/fluxcd"
+  cluster:
+    size: large
+  storage:
+    class: "standard"
+    size: "10Gi"
+  sharding:
+    key: "sharding.fluxcd.io/key"
+    shards:
+      - "shard1"
+      - "shard2"
+    storage: "persistent"
+```
+
+The operator creates a `PersistentVolumeClaim` for each shard, including the main source-controller:
+
+```console
+$ kubectl -n flux-system get pvc
+NAME                          STATUS
+source-controller             Bound
+source-controller-shard1      Bound
+source-controller-shard2      Bound
+```
+
+## Sharding Spec Reference
+
+| Field | Default | Description |
+|---|---|---|
+| `key` | `sharding.fluxcd.io/key` | Label key used to match resources to shard controllers |
+| `shards` | — | List of shard name strings (at least one required) |
+| `storage` | `ephemeral` | Storage mode for source-controller shards: `ephemeral` or `persistent` |
+
+## Assigning Resources to Shards
+
+To route Flux resources to a specific shard, add the sharding key label to every related object. Resources that reference each other — sources, `Kustomization`, `HelmRelease`, `HelmChart`, `ImagePolicy`, `ImageUpdateAutomation`, and `ArtifactGenerator` — must all carry the same shard label.
+
+<Tabs>
+  <Tab title="Kustomization + GitRepository">
+    Assign a `Kustomization` and its `GitRepository` source to `shard1`:
+
+    ```yaml
+    ---
+    apiVersion: source.toolkit.fluxcd.io/v1
+    kind: GitRepository
+    metadata:
+      name: podinfo
+      namespace: default
+      labels:
+        sharding.fluxcd.io/key: shard1
+    spec:
+      interval: 10m
+      url: https://github.com/stefanprodan/podinfo
+      ref:
+        semver: 6.x
+    ---
+    apiVersion: kustomize.toolkit.fluxcd.io/v1
+    kind: Kustomization
+    metadata:
+      name: podinfo
+      namespace: default
+      labels:
+        sharding.fluxcd.io/key: shard1
+    spec:
+      interval: 10m
+      targetNamespace: default
+      sourceRef:
+        kind: GitRepository
+        name: podinfo
+      path: ./kustomize
+      prune: true
+    ```
+  </Tab>
+  <Tab title="HelmRelease + OCIRepository">
+    Assign a `HelmRelease` and its `OCIRepository` source to `shard2`:
+
+    ```yaml
+    ---
+    apiVersion: source.toolkit.fluxcd.io/v1
+    kind: OCIRepository
+    metadata:
+      name: podinfo
+      namespace: default
+      labels:
+        sharding.fluxcd.io/key: shard2
+    spec:
+      interval: 10m
+      url: oci://ghcr.io/stefanprodan/charts/podinfo
+      layerSelector:
+        mediaType: "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
+        operation: copy
+      ref:
+        semver: ">6.0.0"
+    ---
+    apiVersion: helm.toolkit.fluxcd.io/v2
+    kind: HelmRelease
+    metadata:
+      name: podinfo
+      namespace: default
+      labels:
+        sharding.fluxcd.io/key: shard2
+    spec:
+      interval: 10m
+      releaseName: podinfo
+      chartRef:
+        kind: OCIRepository
+        name: podinfo
+    ```
+  </Tab>
+  <Tab title="HelmRelease + HelmRepository">
+    Assign a `HelmRelease`, its `HelmChart`, and `HelmRepository` to `shard2`:
+
+    ```yaml
+    ---
+    apiVersion: source.toolkit.fluxcd.io/v1
+    kind: HelmRepository
+    metadata:
+      name: podinfo
+      namespace: default
+      labels:
+        sharding.fluxcd.io/key: shard2
+    spec:
+      interval: 1h
+      url: https://stefanprodan.github.io/podinfo
+    ---
+    apiVersion: source.toolkit.fluxcd.io/v1
+    kind: HelmChart
+    metadata:
+      name: podinfo
+      namespace: default
+      labels:
+        sharding.fluxcd.io/key: shard2
+    spec:
+      interval: 30m
+      chart: podinfo
+      version: 6.x
+      sourceRef:
+        kind: HelmRepository
+        name: podinfo
+    ---
+    apiVersion: helm.toolkit.fluxcd.io/v2
+    kind: HelmRelease
+    metadata:
+      name: podinfo
+      namespace: default
+      labels:
+        sharding.fluxcd.io/key: shard2
+    spec:
+      interval: 10m
+      releaseName: podinfo
+      chartRef:
+        kind: HelmChart
+        name: podinfo
+    ```
+  </Tab>
+</Tabs>
+
+List all resources assigned to a shard using the Flux CLI label selector:
+
+```console
+$ flux get all -A -l sharding.fluxcd.io/key=shard2
+
+NAME                  	REVISION       	SUSPENDED	READY	MESSAGE
+helmrepository/podinfo	sha256:3dfe15d8	False    	True 	stored artifact: revision 'sha256:3dfe15d8'
+
+NAME             	REVISION	SUSPENDED	READY	MESSAGE
+helmchart/podinfo	6.7.0   	False    	True 	pulled 'podinfo' chart with version '6.7.0'
+
+NAME               	REVISION	SUSPENDED	READY	MESSAGE
+helmrelease/podinfo	6.7.0   	False    	True 	Helm install succeeded for release podinfo-helm/podinfo.v1 with chart podinfo@6.7.0
+```
+
+## Tenant Sharding
+
+Sharding is particularly powerful for multi-tenant clusters where different teams need fully isolated reconciliation pipelines.
+
+<Tabs>
+  <Tab title="Kustomization commonMetadata">
+    Add the sharding key label to a tenant's root `Kustomization` and use `commonMetadata.labels` to propagate the label automatically to all resources it creates:
+
+    ```yaml
+    apiVersion: kustomize.toolkit.fluxcd.io/v1
+    kind: Kustomization
+    metadata:
+      name: tenant1
+      namespace: tenant1
+      labels:
+        sharding.fluxcd.io/key: shard1
+    spec:
+      commonMetadata:
+        labels:
+          sharding.fluxcd.io/key: shard1
+      interval: 10m
+      sourceRef:
+        kind: GitRepository
+        name: tenant1
+      path: ./deploy
+      prune: true
+    ```
+
+    The `commonMetadata.labels` field propagates the shard label to `HelmRelease`, `OCIRepository`, `HelmChart`, `HelmRepository`, and other Flux resources reconciled by this `Kustomization`.
+  </Tab>
+  <Tab title="MutatingAdmissionPolicy">
+    For Kubernetes 1.36 or later, use a `MutatingAdmissionPolicy` to automatically inject the shard label into all Flux resources created in a tenant namespace, without modifying individual manifests.
+
+    Define the policy:
+
+    ```yaml
+    apiVersion: admissionregistration.k8s.io/v1
+    kind: MutatingAdmissionPolicy
+    metadata:
+      name: flux-shard1
+    spec:
+      failurePolicy: Fail
+      reinvocationPolicy: IfNeeded
+      matchConstraints:
+        resourceRules:
+          - apiGroups:
+              - kustomize.toolkit.fluxcd.io
+              - helm.toolkit.fluxcd.io
+              - source.toolkit.fluxcd.io
+            apiVersions: ["*"]
+            operations: ["CREATE", "UPDATE"]
+            resources:
+              - kustomizations
+              - helmreleases
+              - helmcharts
+              - helmrepositories
+              - gitrepositories
+              - ocirepositories
+              - buckets
+      mutations:
+        - patchType: ApplyConfiguration
+          applyConfiguration:
+            expression: >
+              Object{
+                metadata: Object.metadata{
+                  labels: {"sharding.fluxcd.io/key": "shard1"}
+                }
+              }
+    ```
+
+    Bind the policy to the `tenant1` namespace:
+
+    ```yaml
+    apiVersion: admissionregistration.k8s.io/v1
+    kind: MutatingAdmissionPolicyBinding
+    metadata:
+      name: flux-shard1
+    spec:
+      policyName: flux-shard1
+      matchResources:
+        namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: tenant1
+    ```
+  </Tab>
+</Tabs>

@@ -1,0 +1,565 @@
+---
+title: "Ephemeral Environments for GitHub and GitLab PRs"
+sidebarTitle: "Pull Requests"
+description: "Automatically deploy ephemeral preview environments for GitHub Pull Requests and GitLab Merge Requests using the ResourceSetInputProvider API."
+---
+
+The Flux Operator can automatically create, update, and delete ephemeral environments that are tied to the lifecycle of Pull Requests and Merge Requests. When a PR is labeled for deployment, the operator installs a Helm release pinned to the PR's HEAD commit; when the PR is merged or closed, the release is uninstalled and all associated resources are garbage-collected.
+
+## Supported Providers
+
+| `spec.type` | Service |
+|---|---|
+| `GitHubPullRequest` | GitHub.com and GitHub Enterprise |
+| `GitLabMergeRequest` | GitLab.com and self-hosted GitLab |
+| `AzureDevOpsPullRequest` | Azure DevOps Repos |
+| `GiteaPullRequest` | Gitea and Forgejo |
+
+## Exported Inputs
+
+All pull request / merge request providers export the following inputs:
+
+| Input | Description |
+|---|---|
+| `inputs.id` | PR / MR number, safe for use in Kubernetes resource names |
+| `inputs.sha` | Commit SHA at the PR / MR HEAD |
+| `inputs.branch` | Source branch name |
+| `inputs.author` | Username of the PR / MR author |
+| `inputs.title` | Title of the PR / MR |
+
+## Development Workflow
+
+<Steps>
+  <Step title="Developer opens a Pull Request">
+    A PR is opened with changes to the app code and Helm chart.
+  </Step>
+  <Step title="CI builds and tags the image">
+    The CI pipeline builds the container image tagged with the PR HEAD commit SHA and pushes it to the registry.
+  </Step>
+  <Step title="PR is labeled for deployment">
+    A reviewer adds the `deploy/flux-preview` label to the PR.
+  </Step>
+  <Step title="Flux Operator discovers the PR">
+    The `ResourceSetInputProvider` scans the repository using the label filter and finds the labeled PR.
+  </Step>
+  <Step title="Helm release is installed">
+    The `ResourceSet` renders and applies a `GitRepository` and `HelmRelease` for the PR, deploying the app at the preview URL.
+  </Step>
+  <Step title="Developers iterate">
+    Each push to the PR branch updates `inputs.sha`, triggering a Helm release upgrade. The PR comment and commit status are updated automatically.
+  </Step>
+  <Step title="PR is merged or closed">
+    The operator removes the inputs and garbage-collects all generated resources.
+  </Step>
+</Steps>
+
+## Setup
+
+<Tabs>
+  <Tab title="GitHub Pull Requests">
+    ### Preview Namespace
+
+    ```yaml
+    apiVersion: v1
+    kind: Namespace
+    metadata:
+      name: app-preview
+    ---
+    apiVersion: v1
+    kind: ServiceAccount
+    metadata:
+      name: flux
+      namespace: app-preview
+    ---
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata:
+      name: flux
+      namespace: app-preview
+    roleRef:
+      apiGroup: rbac.authorization.k8s.io
+      kind: ClusterRole
+      name: admin
+    subjects:
+      - kind: ServiceAccount
+        name: flux
+        namespace: app-preview
+    ```
+
+    ### GitHub Authentication
+
+    Create a Secret with a GitHub PAT that grants read access to the repository and PR metadata:
+
+    ```shell
+    echo $GITHUB_TOKEN | flux-operator -n app-preview create secret basic-auth github-auth \
+      --username=flux \
+      --password-stdin
+    ```
+
+    Alternatively, use a GitHub App token:
+
+    ```shell
+    flux-operator -n app-preview create secret githubapp github-auth \
+      --app-id=1 \
+      --app-installation-id=2 \
+      --app-private-key-file=./private-key-file.pem
+    ```
+
+    ### ResourceSetInputProvider
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: ResourceSetInputProvider
+    metadata:
+      name: app-pull-requests
+      namespace: app-preview
+      annotations:
+        fluxcd.controlplane.io/reconcileEvery: "10m"
+    spec:
+      type: GitHubPullRequest
+      url: https://github.com/org/app
+      secretRef:
+        name: github-auth
+      filter:
+        labels:
+          - "deploy/flux-preview"
+      defaultValues:
+        chart: "charts/app"
+    ```
+
+    ### Webhook Receiver
+
+    ```yaml
+    apiVersion: notification.toolkit.fluxcd.io/v1
+    kind: Receiver
+    metadata:
+      name: github-receiver
+      namespace: app-preview
+    spec:
+      type: github
+      secretRef:
+        name: receiver-token
+      resources:
+        - apiVersion: fluxcd.controlplane.io/v1
+          kind: ResourceSetInputProvider
+          name: app-pull-requests
+    ```
+
+    ### ResourceSet Template
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: ResourceSet
+    metadata:
+      name: app
+      namespace: app-preview
+    spec:
+      serviceAccountName: flux
+      inputsFrom:
+        - apiVersion: fluxcd.controlplane.io/v1
+          kind: ResourceSetInputProvider
+          name: app-pull-requests
+      resources:
+        - apiVersion: source.toolkit.fluxcd.io/v1
+          kind: GitRepository
+          metadata:
+            name: app-<< inputs.id >>
+            namespace: app-preview
+          spec:
+            provider: generic # or 'github' if using GitHub App
+            interval: 1h
+            url: https://github.com/org/app
+            ref:
+              commit: << inputs.sha >>
+            secretRef:
+              name: github-auth
+        - apiVersion: helm.toolkit.fluxcd.io/v2
+          kind: HelmRelease
+          metadata:
+            name: app-<< inputs.id >>
+            namespace: app-preview
+            annotations:
+              event.toolkit.fluxcd.io/change_request: << inputs.id | quote >>
+              event.toolkit.fluxcd.io/commit: << inputs.sha | quote >>
+              event.toolkit.fluxcd.io/preview-url: "https://app-<< inputs.id >>.example.com"
+              event.toolkit.fluxcd.io/branch: << inputs.branch | quote >>
+              event.toolkit.fluxcd.io/author: << inputs.author | quote >>
+          spec:
+            serviceAccountName: flux
+            interval: 10m
+            releaseName: app-<< inputs.id >>
+            chart:
+              spec:
+                chart: << inputs.chart >>
+                reconcileStrategy: Revision
+                sourceRef:
+                  kind: GitRepository
+                  name: app-<< inputs.id >>
+            values:
+              image:
+                tag: << inputs.sha >>
+              ingress:
+                hosts:
+                  - host: app-<< inputs.id >>.example.com
+    ```
+
+    ### Status Reporting on Pull Requests
+
+    Post a comment on the PR page and a commit status check using Flux notification providers. Both require the corresponding annotations on the `HelmRelease` (already set in the template above):
+
+    ```yaml
+    ---
+    apiVersion: notification.toolkit.fluxcd.io/v1beta3
+    kind: Provider
+    metadata:
+      name: github-pr-comment
+      namespace: app-preview
+    spec:
+      type: githubpullrequestcomment
+      address: https://github.com/org/app
+      secretRef:
+        name: github-auth
+    ---
+    apiVersion: notification.toolkit.fluxcd.io/v1beta3
+    kind: Alert
+    metadata:
+      name: github-pr-comment
+      namespace: app-preview
+    spec:
+      providerRef:
+        name: github-pr-comment
+      eventSeverity: info
+      eventSources:
+        - kind: HelmRelease
+          name: '*'
+    ---
+    apiVersion: notification.toolkit.fluxcd.io/v1beta3
+    kind: Provider
+    metadata:
+      name: github-commit-status
+      namespace: app-preview
+    spec:
+      type: github
+      address: https://github.com/org/app
+      secretRef:
+        name: github-auth
+    ---
+    apiVersion: notification.toolkit.fluxcd.io/v1beta3
+    kind: Alert
+    metadata:
+      name: github-commit-status
+      namespace: app-preview
+    spec:
+      providerRef:
+        name: github-commit-status
+      eventSeverity: info
+      eventSources:
+        - kind: HelmRelease
+          name: '*'
+    ```
+
+    The `githubpullrequestcomment` provider automatically updates the existing comment on subsequent events, so the PR page stays clean.
+
+    ### GitHub Actions Workflow
+
+    Build and push the image tagged with the PR HEAD SHA:
+
+    ```yaml
+    name: push-image-preview
+    on:
+      pull_request:
+        branches: ['main']
+    jobs:
+      docker:
+        runs-on: ubuntu-latest
+        permissions:
+          contents: read
+          packages: write
+        steps:
+          - name: Checkout
+            uses: actions/checkout@v4
+          - name: Login to GitHub Container Registry
+            uses: docker/login-action@v3
+            with:
+              registry: ghcr.io
+              username: ${{ github.actor }}
+              password: ${{ secrets.GITHUB_TOKEN }}
+          - name: Generate image metadata
+            id: meta
+            uses: docker/metadata-action@v5
+            with:
+              images: |
+                ghcr.io/${{ github.repository }}
+              tags: |
+                type=raw,value=${{ github.event.pull_request.head.sha }}
+          - name: Build and push image
+            uses: docker/build-push-action@v6
+            with:
+              push: true
+              context: .
+              file: ./Dockerfile
+              tags: ${{ steps.meta.outputs.tags }}
+              labels: ${{ steps.meta.outputs.labels }}
+    ```
+
+    The image is tagged with `${{ github.event.pull_request.head.sha }}`, which matches the `inputs.sha` value the ResourceSet uses to set the Helm values `image.tag`.
+  </Tab>
+  <Tab title="GitLab Merge Requests">
+    ### Preview Namespace
+
+    ```yaml
+    apiVersion: v1
+    kind: Namespace
+    metadata:
+      name: app-preview
+    ---
+    apiVersion: v1
+    kind: ServiceAccount
+    metadata:
+      name: flux
+      namespace: app-preview
+    ---
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata:
+      name: flux
+      namespace: app-preview
+    roleRef:
+      apiGroup: rbac.authorization.k8s.io
+      kind: ClusterRole
+      name: admin
+    subjects:
+      - kind: ServiceAccount
+        name: flux
+        namespace: app-preview
+    ```
+
+    ### GitLab Authentication
+
+    Create a Secret with a GitLab PAT that grants read access to the project and MR metadata:
+
+    ```shell
+    echo $GITLAB_TOKEN | flux-operator -n app-preview create secret basic-auth gitlab-token-readonly \
+      --username=flux \
+      --password-stdin
+    ```
+
+    ### ResourceSetInputProvider
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: ResourceSetInputProvider
+    metadata:
+      name: app-merge-requests
+      namespace: app-preview
+      annotations:
+        fluxcd.controlplane.io/reconcileEvery: "10m"
+    spec:
+      type: GitLabMergeRequest
+      url: https://gitlab.com/group/app
+      secretRef:
+        name: gitlab-token-readonly
+      filter:
+        labels:
+          - "deploy/flux-preview"
+      defaultValues:
+        chart: "charts/app"
+    ```
+
+    ### Webhook Receiver
+
+    ```yaml
+    apiVersion: notification.toolkit.fluxcd.io/v1
+    kind: Receiver
+    metadata:
+      name: gitlab-receiver
+      namespace: app-preview
+    spec:
+      type: gitlab
+      secretRef:
+        name: receiver-token
+      resources:
+        - apiVersion: fluxcd.controlplane.io/v1
+          kind: ResourceSetInputProvider
+          name: app-merge-requests
+    ```
+
+    ### ResourceSet Template
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: ResourceSet
+    metadata:
+      name: app
+      namespace: app-preview
+    spec:
+      serviceAccountName: flux
+      inputsFrom:
+        - apiVersion: fluxcd.controlplane.io/v1
+          kind: ResourceSetInputProvider
+          name: app-merge-requests
+      resources:
+        - apiVersion: source.toolkit.fluxcd.io/v1
+          kind: GitRepository
+          metadata:
+            name: app-<< inputs.id >>
+            namespace: app-preview
+          spec:
+            interval: 1h
+            url: https://gitlab.com/group/app
+            ref:
+              commit: << inputs.sha >>
+            secretRef:
+              name: gitlab-token-readonly
+        - apiVersion: helm.toolkit.fluxcd.io/v2
+          kind: HelmRelease
+          metadata:
+            name: app-<< inputs.id >>
+            namespace: app-preview
+            annotations:
+              event.toolkit.fluxcd.io/change_request: << inputs.id | quote >>
+              event.toolkit.fluxcd.io/commit: << inputs.sha | quote >>
+              event.toolkit.fluxcd.io/preview-url: "https://app-<< inputs.id >>.example.com"
+              event.toolkit.fluxcd.io/branch: << inputs.branch | quote >>
+              event.toolkit.fluxcd.io/author: << inputs.author | quote >>
+          spec:
+            serviceAccountName: flux
+            interval: 10m
+            releaseName: app-<< inputs.id >>
+            chart:
+              spec:
+                chart: << inputs.chart >>
+                reconcileStrategy: Revision
+                sourceRef:
+                  kind: GitRepository
+                  name: app-<< inputs.id >>
+            values:
+              image:
+                tag: << inputs.sha >>
+              ingress:
+                hosts:
+                  - host: app-<< inputs.id >>.example.com
+    ```
+
+    ### Status Reporting on Merge Requests
+
+    ```yaml
+    ---
+    apiVersion: notification.toolkit.fluxcd.io/v1beta3
+    kind: Provider
+    metadata:
+      name: gitlab-mr-comment
+      namespace: app-preview
+    spec:
+      type: gitlabmergerequestcomment
+      address: https://gitlab.com/group/app
+      secretRef:
+        name: gitlab-token-readonly
+    ---
+    apiVersion: notification.toolkit.fluxcd.io/v1beta3
+    kind: Alert
+    metadata:
+      name: gitlab-mr-comment
+      namespace: app-preview
+    spec:
+      providerRef:
+        name: gitlab-mr-comment
+      eventSeverity: info
+      eventSources:
+        - kind: HelmRelease
+          name: '*'
+    ---
+    apiVersion: notification.toolkit.fluxcd.io/v1beta3
+    kind: Provider
+    metadata:
+      name: gitlab-commit-status
+      namespace: app-preview
+    spec:
+      type: gitlab
+      address: https://gitlab.com/group/app
+      secretRef:
+        name: gitlab-token-readonly
+    ---
+    apiVersion: notification.toolkit.fluxcd.io/v1beta3
+    kind: Alert
+    metadata:
+      name: gitlab-commit-status
+      namespace: app-preview
+    spec:
+      providerRef:
+        name: gitlab-commit-status
+      eventSeverity: info
+      eventSources:
+        - kind: HelmRelease
+          name: '*'
+    ```
+
+    The `gitlabmergerequestcomment` provider posts a single comment on the MR and updates it on subsequent events. The `gitlab` commit status provider posts a pipeline status check.
+  </Tab>
+</Tabs>
+
+## Handling Slow CI Builds
+
+If your CI pipeline takes longer than 10 minutes to build artifacts, the `ResourceSetInputProvider` may reconcile and update `inputs.sha` before the new image is available. To prevent deploying with a SHA that has not been built yet, use a `generic` Receiver and a skip label:
+
+```yaml
+# Use a generic Receiver triggered only at the end of CI
+apiVersion: notification.toolkit.fluxcd.io/v1
+kind: Receiver
+metadata:
+  name: github-receiver
+  namespace: app-preview
+spec:
+  type: generic
+  secretRef:
+    name: receiver-token
+  resources:
+    - apiVersion: fluxcd.controlplane.io/v1
+      kind: ResourceSetInputProvider
+      name: app-pull-requests
+```
+
+```yaml
+# Configure the provider to skip updates when the pause label is present
+spec:
+  skip:
+    labels:
+      - "deploy/flux-preview-pause"
+```
+
+In your GitHub Actions workflow, add and remove the pause label around the build steps, then call the generic receiver webhook at the end:
+
+```yaml
+- name: Add label to prevent ResourceSetInputProvider from updating
+  run: gh pr edit $PR_NUMBER --add-label deploy/flux-preview-pause
+  env:
+    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    PR_NUMBER: ${{ github.event.pull_request.number }}
+# ... build and push steps ...
+- name: Remove label to allow ResourceSetInputProvider to update
+  run: gh pr edit $PR_NUMBER --remove-label deploy/flux-preview-pause
+  env:
+    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    PR_NUMBER: ${{ github.event.pull_request.number }}
+- name: Trigger Flux Receiver
+  run: curl -X POST $FLUX_RECEIVER_WEBHOOK
+  env:
+    FLUX_RECEIVER_WEBHOOK: ${{ secrets.FLUX_RECEIVER_WEBHOOK }}
+```
+
+## Validate Templates Locally
+
+```shell
+flux-operator build resourceset -f app-resourceset.yaml \
+  --inputs-from test-inputs.yaml
+```
+
+Example `test-inputs.yaml`:
+
+```yaml
+- author: test
+  branch: feat/test
+  id: "1"
+  sha: bf5d6e01cf802734853f6f3417b237e3ad0ba35d
+  title: 'testing'
+```

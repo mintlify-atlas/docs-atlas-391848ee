@@ -1,0 +1,350 @@
+---
+title: "Trigger and Control Flux Reconciliation from the CLI"
+sidebarTitle: "Reconcile"
+description: "Use flux-operator reconcile, suspend, resume, delete, and wait commands to control the lifecycle of Flux Operator resources and Flux objects in your cluster."
+---
+
+The `reconcile`, `suspend`, `resume`, `delete`, and `wait` command groups give you direct control over the Flux reconciliation lifecycle from the command line. Whether you need to force an immediate sync, temporarily pause reconciliation during a maintenance window, or cleanly remove a resource from the cluster, these commands provide the primitives. All commands in this group require cluster access and a running Flux Operator installation.
+
+## Reconcile Commands
+
+Trigger an immediate reconciliation without waiting for the next scheduled interval.
+
+### `flux-operator reconcile instance <name>`
+
+Triggers reconciliation of a `FluxInstance` resource.
+
+```shell
+flux-operator reconcile instance flux -n flux-system
+flux-operator reconcile instance flux -n flux-system --wait
+```
+
+---
+
+### `flux-operator reconcile rset <name>`
+
+Triggers reconciliation of a `ResourceSet` resource.
+
+```shell
+flux-operator reconcile rset my-apps -n apps
+flux-operator reconcile rset my-apps -n apps --wait
+```
+
+---
+
+### `flux-operator reconcile rsip <name>`
+
+Triggers reconciliation of a `ResourceSetInputProvider` resource.
+
+```shell
+flux-operator reconcile rsip github-releases -n apps
+```
+
+---
+
+### `flux-operator reconcile resource <kind>/<name>`
+
+Triggers reconciliation of any Flux resource in the specified namespace.
+
+```shell
+# Reconcile a Kustomization
+flux-operator reconcile resource Kustomization/infrastructure -n flux-system
+
+# Reconcile a HelmRelease
+flux-operator reconcile resource HelmRelease/podinfo -n apps --wait
+
+# Reconcile a GitRepository
+flux-operator reconcile resource GitRepository/flux-system -n flux-system
+```
+
+---
+
+### `flux-operator reconcile all`
+
+Triggers reconciliation of all Flux resources in the cluster. Supports filtering by namespace and ready status to target only specific subsets.
+
+```shell
+# Reconcile all Flux resources
+flux-operator reconcile all -A
+
+# Reconcile only failed resources
+flux-operator reconcile all --ready-status False -A
+
+# Reconcile all resources in a specific namespace
+flux-operator reconcile all -n apps
+```
+
+**Flags for reconcile commands**
+
+| Flag | Description |
+|---|---|
+| `-n, --namespace` | Namespace scope of the command |
+| `--wait` | Wait for reconciliation to complete before returning |
+| `--ready-status` | Filter by ready status (`True`, `False`, `Unknown`, `Suspended`) — `reconcile all` only |
+
+---
+
+## Suspend Commands
+
+Temporarily pause reconciliation of a resource. A suspended resource retains its managed objects but will not apply any further changes until resumed.
+
+### `flux-operator suspend instance <name>`
+
+```shell
+flux-operator suspend instance flux -n flux-system
+```
+
+---
+
+### `flux-operator suspend rset <name>`
+
+```shell
+flux-operator suspend rset my-apps -n apps
+```
+
+---
+
+### `flux-operator suspend rsip <name>`
+
+```shell
+flux-operator suspend rsip github-releases -n apps
+```
+
+---
+
+### `flux-operator suspend resource <kind>/<name>`
+
+Suspends any Flux resource in the specified namespace.
+
+```shell
+flux-operator suspend resource Kustomization/infrastructure -n flux-system
+flux-operator suspend resource HelmRelease/podinfo -n apps
+flux-operator suspend resource GitRepository/flux-system -n flux-system
+```
+
+**Flags for suspend commands**
+
+| Flag | Description |
+|---|---|
+| `-n, --namespace` | Namespace scope of the command |
+
+---
+
+## Resume Commands
+
+Resume reconciliation of a previously suspended resource and optionally wait for the first reconciliation to complete.
+
+### `flux-operator resume instance <name>`
+
+```shell
+flux-operator resume instance flux -n flux-system
+flux-operator resume instance flux -n flux-system --wait
+```
+
+---
+
+### `flux-operator resume rset <name>`
+
+```shell
+flux-operator resume rset my-apps -n apps
+flux-operator resume rset my-apps -n apps --wait
+```
+
+---
+
+### `flux-operator resume rsip <name>`
+
+```shell
+flux-operator resume rsip github-releases -n apps
+```
+
+---
+
+### `flux-operator resume resource <kind>/<name>`
+
+Resumes any Flux resource in the specified namespace.
+
+```shell
+flux-operator resume resource Kustomization/infrastructure -n flux-system --wait
+flux-operator resume resource HelmRelease/podinfo -n apps
+```
+
+**Flags for resume commands**
+
+| Flag | Description |
+|---|---|
+| `-n, --namespace` | Namespace scope of the command |
+| `--wait` | Wait for reconciliation to complete after resuming |
+
+<Tip>
+  Use `suspend` and `resume` during rolling maintenance windows to prevent Flux from reconciling while you apply manual changes. Always `resume` after maintenance to restore GitOps-driven management.
+</Tip>
+
+---
+
+## Delete Commands
+
+Remove Flux Operator resources from the cluster. By default, delete commands wait for the resource to be fully removed before returning.
+
+### `flux-operator delete instance <name>`
+
+Deletes a `FluxInstance` resource from the cluster.
+
+```shell
+flux-operator delete instance flux -n flux-system
+```
+
+---
+
+### `flux-operator delete rset <name>`
+
+Deletes a `ResourceSet` resource from the cluster.
+
+```shell
+flux-operator delete rset my-apps -n apps
+```
+
+---
+
+### `flux-operator delete rsip <name>`
+
+Deletes a `ResourceSetInputProvider` resource from the cluster.
+
+```shell
+flux-operator delete rsip github-releases -n apps
+```
+
+**Flags for delete commands**
+
+| Flag | Description | Default |
+|---|---|---|
+| `-n, --namespace` | Namespace scope of the command | Current context namespace |
+| `--wait` | Wait for the resource to be deleted before returning | `true` |
+| `--with-suspend` | Suspend the resource before deleting it, leaving managed resources in-place | `false` |
+
+**Example — suspend before delete to preserve managed resources**
+
+```shell
+# This suspends reconciliation first, so the managed Kubernetes objects
+# (Deployments, Services, etc.) remain on the cluster after deletion.
+flux-operator delete rset my-apps -n apps --with-suspend
+```
+
+<Warning>
+  Deleting a `FluxInstance` or `ResourceSet` **without** `--with-suspend` will trigger garbage collection of all managed resources. Use `--with-suspend` if you want to remove the Flux Operator resource while keeping the workloads running.
+</Warning>
+
+---
+
+## Wait Commands
+
+Block until a resource reaches a ready state or a timeout is exceeded. If the resource is not created or does not become ready within the timeout window, the command returns a non-zero exit code.
+
+### `flux-operator wait instance <name>`
+
+```shell
+flux-operator wait instance flux -n flux-system
+flux-operator wait instance flux -n flux-system --timeout 5m
+```
+
+---
+
+### `flux-operator wait rset <name>`
+
+```shell
+flux-operator wait rset my-apps -n apps
+flux-operator wait rset my-apps -n apps --timeout 2m
+```
+
+---
+
+### `flux-operator wait rsip <name>`
+
+```shell
+flux-operator wait rsip github-releases -n apps --timeout 3m
+```
+
+**Flags for wait commands**
+
+| Flag | Description | Default |
+|---|---|---|
+| `-n, --namespace` | Namespace scope of the command | Current context namespace |
+| `--timeout` | Maximum time to wait before giving up | `1m` |
+
+**Using wait in CI pipelines**
+
+<Steps>
+  <Step title="Apply the resource">
+    ```shell
+    kubectl apply -f flux-instance.yaml
+    ```
+  </Step>
+  <Step title="Wait for readiness">
+    ```shell
+    flux-operator wait instance flux -n flux-system --timeout 5m
+    ```
+  </Step>
+  <Step title="Check exit code">
+    The command exits with code `0` on success and non-zero on timeout or error, making it suitable for CI gate checks.
+  </Step>
+</Steps>
+
+---
+
+## Migrate Commands
+
+Clean up managed fields left on cluster resources after ownership or API version changes.
+
+### `flux-operator migrate owner <kind>/<name>`
+
+Cleans up stale managed field entries left by previous Flux appliers (`HelmRelease`, `Kustomization`, `ResourceSet`, or `FluxInstance`), making the current applier the sole Flux field-owner on each resource.
+
+```shell
+# Preview what would be cleaned up
+flux-operator migrate owner Kustomization/infrastructure -n flux-system --dry-run
+
+# Apply the cleanup
+flux-operator migrate owner Kustomization/infrastructure -n flux-system
+```
+
+**Flags**
+
+| Flag | Description |
+|---|---|
+| `-n, --namespace` | Namespace of the applier |
+| `--dry-run` | List stale managers without patching resources |
+
+---
+
+### `flux-operator migrate resources`
+
+Migrates managed fields of Kubernetes resources to a target API version. This resolves `field not declared in schema` errors that occur after a CRD introduces a new storage version with defaulted fields.
+
+```shell
+# Preview migration
+flux-operator migrate resources \
+  --api-version source.toolkit.fluxcd.io/v1 \
+  --kind GitRepository \
+  -A \
+  --dry-run
+
+# Apply migration across all namespaces
+flux-operator migrate resources \
+  --api-version source.toolkit.fluxcd.io/v1 \
+  --kind GitRepository \
+  -A
+```
+
+**Flags**
+
+| Flag | Description |
+|---|---|
+| `--api-version` | Target API version in `group/version` format **(required)** |
+| `--kind` | Kind of resources to migrate **(required)** |
+| `-n, --namespace` | Namespace scope |
+| `-A, --all-namespaces` | Migrate resources in all namespaces |
+| `--dry-run` | List resources needing migration without patching them |
+
+<Note>
+  Before patching, `migrate resources` verifies that the target API version is present in the CRD's `status.storedVersions` field. If not, the command will return an error rather than risk data corruption.
+</Note>

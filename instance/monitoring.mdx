@@ -1,0 +1,202 @@
+---
+title: "Monitor Flux with Metrics and Reports"
+sidebarTitle: "Monitoring"
+description: "Monitor Flux using FluxReport status reports, Prometheus metrics for instances and resources, Kubernetes events, and Flux Alert/Provider notifications."
+---
+
+The Flux Operator provides multiple observability layers for Flux: a structured `FluxReport` custom resource that summarises the entire Flux installation, Prometheus metrics exported for every Flux resource in the cluster, Kubernetes events for lifecycle changes, and native integration with the Flux notification system for alerting.
+
+## FluxReport Status Reports
+
+The operator automatically generates and maintains a `FluxReport` custom resource named **flux** in the same namespace where the operator runs. The report captures installed components and their readiness, distribution details, reconciler statistics, and cluster sync status — regardless of how Flux was originally installed (CLI, Terraform, Helm, or Flux Operator).
+
+<Note>
+For the report to be accurate, the operator must be running in the same namespace as the Flux controllers.
+</Note>
+
+View the full report in YAML:
+
+```shell
+kubectl -n flux-system get fluxreport/flux -o yaml
+```
+
+The operator refreshes the report every **five minutes** by default. Trigger an immediate refresh with:
+
+```shell
+kubectl -n flux-system annotate --overwrite fluxreport/flux \
+  reconcile.fluxcd.io/requestedAt="$(date +%s)"
+```
+
+When running the operator via Helm, lower the reporting interval to align with Prometheus scrape frequency:
+
+```shell
+helm upgrade flux-operator oci://ghcr.io/controlplaneio-fluxcd/charts/flux-operator \
+  --namespace flux-system \
+  --set reporting.interval=30s
+```
+
+## Kubernetes Events
+
+The Flux Operator emits Kubernetes events against the `FluxInstance` resource to report on installation progress, upgrades, and failures. These events are useful for auditing the Flux lifecycle and debugging upgrade issues.
+
+List all events for the Flux instance:
+
+```shell
+kubectl -n flux-system events --for fluxinstance/flux
+```
+
+### Alert/Provider Integration
+
+Forward operator events to any supported notification channel by creating a Flux `Provider` and `Alert` pair. The following example sends `FluxInstance` events to a Slack channel:
+
+```yaml
+apiVersion: notification.toolkit.fluxcd.io/v1beta3
+kind: Provider
+metadata:
+  name: slack-bot
+  namespace: flux-system
+spec:
+  type: slack
+  channel: general
+  address: https://slack.com/api/chat.postMessage
+  secretRef:
+    name: slack-bot-token
+---
+apiVersion: notification.toolkit.fluxcd.io/v1beta3
+kind: Alert
+metadata:
+  name: flux-operator
+  namespace: flux-system
+spec:
+  providerRef:
+    name: slack-bot
+  eventSeverity: info
+  eventSources:
+    - kind: FluxInstance
+      name: flux
+```
+
+The `notification-controller` supports many providers including Microsoft Teams, Datadog, Grafana, PagerDuty, and more. See the [alert provider documentation](https://fluxcd.io/flux/components/notification/providers/) for the full list.
+
+## Prometheus Metrics
+
+The Flux Operator exposes metrics in Prometheus format on port `8080` via the `flux-operator` Kubernetes Service. The metrics cover the `FluxInstance`, all Flux resources across the cluster, and Go/controller-runtime internals.
+
+### ServiceMonitor
+
+On clusters with the Prometheus Operator installed, create a `ServiceMonitor` to scrape the operator:
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: flux-operator
+  namespace: flux-system
+  labels:
+    release: kube-prometheus-stack
+spec:
+  namespaceSelector:
+    matchNames:
+      - flux-system
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: flux-operator
+  endpoints:
+    - targetPort: 8080
+      path: /metrics
+      interval: 30s
+```
+
+<Tip>
+The Flux Operator Helm chart includes an optional `ServiceMonitor` resource. Enable it by setting `serviceMonitor.create=true` during installation or upgrade.
+</Tip>
+
+On clusters with Prometheus auto-discovery enabled, the operator pods are automatically scraped because they carry the `prometheus.io/scrape: "true"` annotation.
+
+### Metric Families
+
+<Tabs>
+  <Tab title="flux_instance_info">
+    Exported for each `FluxInstance` resource. Refreshed on every reconciliation cycle.
+
+    ```text
+    flux_instance_info{uid, kind, name, exported_namespace, ready, suspended, registry, revision}
+    ```
+
+    | Label | Description |
+    |---|---|
+    | `uid` | Kubernetes unique identifier of the resource |
+    | `kind` | Resource kind — always `FluxInstance` |
+    | `name` | Resource name — always `flux` |
+    | `exported_namespace` | Namespace where Flux is deployed (e.g. `flux-system`) |
+    | `ready` | Readiness status: `True`, `False`, or `Unknown` |
+    | `reason` | Reason for the readiness status (e.g. `Progressing`, `BuildFailed`, `HealthCheckFailed`) |
+    | `suspended` | Suspension status: `True` or `False` |
+    | `registry` | Container registry in use (e.g. `ghcr.io/fluxcd`) |
+    | `revision` | Installed Flux revision (e.g. `v2.3.0@sha256:75aa209c6a...`) |
+  </Tab>
+  <Tab title="flux_resource_info">
+    Exported for every Flux resource found in the cluster. Refreshed on the same schedule as `FluxReport`.
+
+    ```text
+    flux_resource_info{uid, kind, name, exported_namespace, ready, suspended, ...}
+    ```
+
+    Common labels on all resource kinds:
+
+    | Label | Description |
+    |---|---|
+    | `uid` | Kubernetes unique identifier |
+    | `kind` | Resource kind (e.g. `GitRepository`, `Kustomization`) |
+    | `name` | Resource name |
+    | `exported_namespace` | Namespace of the resource |
+    | `ready` | Readiness status: `True`, `False`, or `Unknown` |
+    | `reason` | Reason code for the readiness status |
+    | `suspended` | Suspension status: `True` or `False` |
+
+    Additional labels per resource kind:
+
+    | Resource Kind | Extra Labels |
+    |---|---|
+    | `Kustomization` | `revision`, `source_name`, `path` |
+    | `GitRepository` | `revision`, `url`, `ref` |
+    | `OCIRepository` | `revision`, `url`, `ref` |
+    | `Bucket` | `revision`, `url`, `ref` |
+    | `HelmRelease` | `revision`, `source_name` |
+    | `HelmChart` | `revision`, `source_name` |
+    | `HelmRepository` | `revision`, `url` |
+    | `Receiver` | `url` |
+    | `ImageRepository` | `url` |
+    | `ImagePolicy` | `source_name` |
+    | `ImageUpdateAutomation` | `source_name` |
+  </Tab>
+  <Tab title="flux_resourceset_info">
+    Exported for `ResourceSet` and `ResourceSetInputProvider` resources managed by the operator.
+
+    ```text
+    flux_resourceset_info{uid, kind, name, exported_namespace, resources, ready, suspended, revision}
+    flux_resourcesetinputprovider_info{uid, kind, name, exported_namespace, ready, suspended, url}
+    ```
+
+    | Label | Description |
+    |---|---|
+    | `uid` | Kubernetes unique identifier |
+    | `kind` | Resource kind (e.g. `ResourceSet`) |
+    | `name` | Resource name |
+    | `exported_namespace` | Namespace where the resource is deployed |
+    | `ready` | Readiness status: `True`, `False`, or `Unknown` |
+    | `reason` | Reason code (e.g. `ReconciliationSucceeded`, `BuildFailed`, `HealthCheckFailed`) |
+    | `suspended` | Suspension status: `True` or `False` |
+  </Tab>
+  <Tab title="Controller Runtime">
+    The operator also exposes standard Kubernetes controller-runtime and Go runtime metrics. Key metrics for troubleshooting:
+
+    | Metric | Description |
+    |---|---|
+    | `controller_runtime_reconcile_errors_total{controller}` | Total reconciliation errors per controller |
+    | `rest_client_requests_total{code, method}` | Kubernetes API requests by status code and method |
+    | `go_memstats_alloc_bytes` | Bytes currently allocated in the Go heap |
+    | `go_goroutines` | Current number of goroutines |
+    | `workqueue_longest_running_processor_seconds` | Longest time a workqueue item has been processing |
+  </Tab>
+</Tabs>

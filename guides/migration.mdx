@@ -1,0 +1,295 @@
+---
+title: "Migrate from Flux Bootstrap to Flux Operator"
+sidebarTitle: "Migration"
+description: "Zero-downtime guide to migrating from flux bootstrap or Terraform to an operator-managed Flux instance, including OCI artifact delivery."
+---
+
+If you have an existing cluster bootstrapped with the Flux CLI or the Flux Terraform Provider, you can migrate to an operator-managed Flux instance with zero downtime. The Flux Operator takes over management of the Flux controllers, `GitRepository`, and root `Kustomization` without disrupting any of your running workloads.
+
+## Migrate from Flux Bootstrap
+
+<Steps>
+  <Step title="Install the Flux Operator">
+    Install the Flux Operator into the **same namespace** where Flux is already deployed. This allows the operator to adopt the existing Flux components without tearing them down first.
+
+    ```shell
+    helm install flux-operator oci://ghcr.io/controlplaneio-fluxcd/charts/flux-operator \
+      --namespace flux-system
+    ```
+
+    For alternative installation methods, see the [installation guide](/guides/installation).
+  </Step>
+
+  <Step title="Create a FluxInstance">
+    Create a `FluxInstance` resource named **flux** in the `flux-system` namespace using the same configuration as your original `flux bootstrap` command.
+
+    For example, if you bootstrapped with:
+
+    ```shell
+    flux bootstrap github \
+      --components-extra=source-watcher \
+      --owner=my-org \
+      --repository=my-fleet \
+      --branch=main \
+      --path=clusters/my-cluster
+    ```
+
+    The equivalent `FluxInstance` looks like this:
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: FluxInstance
+    metadata:
+      name: flux
+      namespace: flux-system
+    spec:
+      distribution:
+        version: "2.8.x"
+        registry: "ghcr.io/fluxcd"
+      components:
+        - source-controller
+        - source-watcher
+        - kustomize-controller
+        - helm-controller
+        - notification-controller
+      cluster:
+        type: kubernetes
+        multitenant: false
+        networkPolicy: true
+        domain: "cluster.local"
+      sync:
+        kind: GitRepository
+        url: "ssh://git@github.com/my-org/my-fleet.git"
+        ref: "refs/heads/main"
+        path: "clusters/my-cluster"
+        pullSecret: "flux-system"
+    ```
+
+    <Note>
+      If you customized the Flux manifests with Kustomize patches (in your `flux-system/kustomization.yaml`), copy those patches into the `FluxInstance` under `.spec.kustomize.patches`. See the instance customization guide for details.
+    </Note>
+
+    Apply the manifest to the cluster:
+
+    ```shell
+    kubectl apply -f flux-instance.yaml
+    ```
+  </Step>
+
+  <Step title="Verify the migration">
+    Once the `FluxInstance` is reconciled, the operator takes over management of the Flux components. Verify the migration was successful:
+
+    ```shell
+    kubectl -n flux-system get fluxinstance flux
+    ```
+
+    Running the trace command against the `flux-system` Kustomization should now return a "Not managed by Flux" message, confirming that the operator — not Flux itself — owns these resources:
+
+    ```shell
+    flux trace kustomization flux-system
+    ```
+  </Step>
+
+  <Step title="Clean up the repository">
+    To finalize the migration, remove the auto-generated Flux manifests from your Git repository:
+
+    1. Check out the main branch of the repository used for bootstrap.
+    2. Delete the `flux-system` directory from `clusters/my-cluster/`.
+    3. Optionally, place the `FluxInstance` YAML manifest in the `clusters/my-cluster/` directory so it is managed by Flux going forward.
+    4. Commit and push the changes.
+  </Step>
+</Steps>
+
+## Git Credentials Rotation
+
+To rotate the Git credentials used by Flux, overwrite the existing pull secret using the Flux Operator CLI. The CLI handles creating or updating the secret in-place without downtime.
+
+<Tabs>
+  <Tab title="SSH Key">
+    ```shell
+    flux-operator create secret ssh flux-system \
+      --namespace=flux-system \
+      --private-key-file=./path/to/private-key \
+      --knownhosts-file=./path/to/known_hosts
+    ```
+  </Tab>
+
+  <Tab title="Personal Access Token">
+    ```shell
+    echo $GIT_TOKEN | flux-operator create secret basic-auth flux-system \
+      --namespace=flux-system \
+      --username=git \
+      --password-stdin
+    ```
+  </Tab>
+
+  <Tab title="GitHub App">
+    ```shell
+    flux-operator create secret githubapp flux-system \
+      --namespace=flux-system \
+      --app-id=1 \
+      --app-installation-owner=my-org \
+      --app-private-key-file=./path/to/private-key-file.pem
+    ```
+  </Tab>
+</Tabs>
+
+## Automating Flux Operator Upgrades
+
+If the Flux Operator is installed with Helm, you can automate upgrades by managing the Helm release with Flux itself. Create a `ResourceSet` that defines an `OCIRepository` source and a `HelmRelease` pointing to it:
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSet
+metadata:
+  name: flux-operator
+  namespace: flux-system
+spec:
+  inputs:
+    - version: "*"
+  resources:
+   - apiVersion: source.toolkit.fluxcd.io/v1
+     kind: OCIRepository
+     metadata:
+      name: << inputs.provider.name >>
+      namespace: << inputs.provider.namespace >>
+     spec:
+      interval: 30m
+      url: oci://ghcr.io/controlplaneio-fluxcd/charts/flux-operator
+      layerSelector:
+        mediaType: "application/vnd.cncf.helm.chart.content.v1.tar+gzip"
+        operation: copy
+      ref:
+        semver: << inputs.version | quote >>
+   - apiVersion: helm.toolkit.fluxcd.io/v2
+     kind: HelmRelease
+     metadata:
+        name: << inputs.provider.name >>
+        namespace: << inputs.provider.namespace >>
+     spec:
+      interval: 30m
+      releaseName: << inputs.provider.name >>
+      serviceAccountName: << inputs.provider.name >>
+      chartRef:
+        kind: OCIRepository
+        name: << inputs.provider.name >>
+```
+
+Commit and push this manifest to your Flux repository. The operator will be automatically upgraded whenever a new Helm chart version is released and the `OCIRepository` detects the new semver tag.
+
+## Migrate from Git to OCI Artifacts
+
+To decouple Flux reconciliation from Git and adopt OCI artifacts as the delivery mechanism for your cluster's desired state, follow this procedure. OCI delivery removes the need for Flux to hold long-lived Git credentials and enables immutable, content-addressable artifact distribution.
+
+<Steps>
+  <Step title="Prepare the Flux manifests on a new branch">
+    Create a branch called `oci-artifacts` in your Git repository.
+
+    Update all Flux `Kustomization` manifests to reference `OCIRepository` instead of `GitRepository`:
+
+    ```yaml
+    apiVersion: kustomize.toolkit.fluxcd.io/v1
+    kind: Kustomization
+    spec:
+      sourceRef:
+        kind: OCIRepository
+        name: flux-system
+    ```
+
+    If you have `HelmRelease` resources pointing to a `GitRepository`, update those as well. Commit and push to the `oci-artifacts` branch.
+  </Step>
+
+  <Step title="Create a GitHub Actions workflow to publish artifacts">
+    Add a CI workflow that uses the Flux CLI to build and push OCI artifacts to GitHub Container Registry on every push to `main` or `oci-artifacts`:
+
+    ```yaml
+    name: publish-artifact
+
+    on:
+      workflow_dispatch:
+      push:
+        branches:
+          - 'main'
+          - 'oci-artifacts'
+
+    permissions:
+      packages: write
+
+    jobs:
+      flux-push:
+        runs-on: ubuntu-latest
+        steps:
+          - name: Checkout
+            uses: actions/checkout@v4
+          - name: Setup Flux CLI
+            uses: fluxcd/flux2/action@main
+          - name: Push immutable artifact
+            run: |
+              flux push artifact \
+                oci://ghcr.io/${{ github.repository }}/manifests:$(git rev-parse --short HEAD) \
+                --source="$(git config --get remote.origin.url)" \
+                --revision="$(git branch --show-current)@sha1:$(git rev-parse HEAD)" \
+                --creds flux:${{ secrets.GITHUB_TOKEN }} \
+                --path="./"
+          - name: Tag artifact as latest
+            run: |
+              flux tag artifact \
+                oci://ghcr.io/${{ github.repository }}/manifests:$(git rev-parse --short HEAD) \
+                --creds flux:${{ secrets.GITHUB_TOKEN }} \
+                --tag latest
+    ```
+
+    Commit and push the workflow. Trigger it manually in the GitHub UI, then verify the artifact is accessible:
+
+    ```shell
+    flux pull artifact oci://ghcr.io/my-org/my-fleet/manifests:latest \
+        --creds flux:${GITHUB_TOKEN} \
+        --output-dir ./manifests
+    ```
+  </Step>
+
+  <Step title="Create an image pull secret">
+    Create a registry secret in `flux-system` containing a GitHub token with read access to the GitHub Container Registry:
+
+    ```shell
+    echo ${GITHUB_TOKEN} | flux-operator create secret registry ghcr-auth \
+        --namespace=flux-system \
+        --server=ghcr.io \
+        --username=flux \
+        --password-stdin
+    ```
+  </Step>
+
+  <Step title="Update the FluxInstance to use OCI artifacts">
+    Update your `FluxInstance` to point to the OCI repository and reference the pull secret:
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: FluxInstance
+    metadata:
+      name: flux
+      namespace: flux-system
+    spec:
+      sync:
+        kind: OCIRepository
+        url: "oci://ghcr.io/my-org/my-fleet/manifests"
+        ref: "latest"
+        path: "clusters/my-cluster"
+        pullSecret: "ghcr-auth"
+    ```
+
+    Commit and push the updated `FluxInstance` to the `oci-artifacts` branch and wait for the GitHub workflow to publish the manifests. Then apply the manifest and verify that Flux has been reconfigured:
+
+    ```shell
+    kubectl apply -f flux-instance.yaml
+    kubectl -n flux-system wait fluxinstance/flux --for=condition=Ready
+
+    flux get source oci flux-system
+    flux get kustomization flux-system
+    ```
+  </Step>
+
+  <Step title="Merge and clean up">
+    Once verified, merge `oci-artifacts` into `main` and delete the branch. From this point, every push to `main` will trigger the CI workflow to publish a new OCI artifact, and Flux will reconcile the cluster state from that artifact automatically.
+  </Step>
+</Steps>

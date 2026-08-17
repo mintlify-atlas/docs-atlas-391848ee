@@ -1,0 +1,278 @@
+---
+title: "Offline Manifest Generation with Build, Diff, and Patch"
+sidebarTitle: "Build & Patch"
+description: "Use the flux-operator build, diff, and patch commands to generate Flux manifests, compare YAML files, and create kustomize upgrade patches — all without cluster access."
+---
+
+The `build`, `diff`, and `patch` commands are the only Flux Operator CLI commands that run entirely **offline**. No Kubernetes cluster is needed — they work against local files and remote URLs, making them ideal for CI validation pipelines, local development, and GitOps pre-flight checks. Each command writes to stdout so its output can be piped directly into `kubectl apply`, saved to a file, or diffed in a pull request.
+
+## Build Commands
+
+### `flux-operator build instance`
+
+Generates the complete set of Flux Kubernetes manifests from a `FluxInstance` YAML definition. The output is a multi-document YAML stream that mirrors what the Flux Operator would apply to the cluster, including Deployments, RBAC, NetworkPolicies, and CRDs.
+
+**Flags**
+
+| Flag | Description |
+|---|---|
+| `-f, --file` | Path to the `FluxInstance` YAML manifest **(required)** |
+| `--distribution-artifact` | OCI artifact URL of the Flux distribution; takes precedence over `.spec.distribution` in the manifest |
+
+**Example — render manifests from a local file**
+
+```shell
+flux-operator build instance -f flux-instance.yaml
+```
+
+**Example — override the distribution artifact**
+
+```shell
+flux-operator build instance \
+  -f flux-instance.yaml \
+  --distribution-artifact oci://ghcr.io/controlplaneio-fluxcd/flux-operator-manifests:v2.8.0
+```
+
+**Example — pipe directly into kubectl**
+
+```shell
+flux-operator build instance -f flux-instance.yaml | kubectl apply --dry-run=client -f -
+```
+
+**Sample `FluxInstance` input**
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: FluxInstance
+metadata:
+  name: flux
+  namespace: flux-system
+spec:
+  distribution:
+    version: "2.8.x"
+    registry: "ghcr.io/fluxcd"
+  sync:
+    kind: GitRepository
+    url: "https://github.com/my-org/my-fleet.git"
+    ref: "refs/heads/main"
+    path: "clusters/my-cluster"
+```
+
+---
+
+### `flux-operator build rset`
+
+Generates the Kubernetes manifests from a `ResourceSet` YAML definition. For resource sets that use `.spec.steps`, each step's objects are printed in step order and preceded by a `# step: <name>` comment line, making it easy to understand execution order.
+
+**Flags**
+
+| Flag | Description |
+|---|---|
+| `-f, --file` | Path to the `ResourceSet` YAML manifest **(required)** |
+| `--inputs-from` | Path to a `ResourceSet` inputs YAML manifest |
+| `--inputs-from-provider` | Path to a `ResourceSetInputProvider` static-type YAML manifest |
+
+**Example — render a basic ResourceSet**
+
+```shell
+flux-operator build rset -f resourceset.yaml
+```
+
+**Example — render with inputs from a provider**
+
+```shell
+flux-operator build rset \
+  -f resourceset.yaml \
+  --inputs-from-provider rsip.yaml
+```
+
+**Example — render with static inputs**
+
+```shell
+flux-operator build rset \
+  -f resourceset.yaml \
+  --inputs-from inputs.yaml
+```
+
+**Step-ordered output format**
+
+When a `ResourceSet` uses `.spec.steps`, the output includes step separators:
+
+```yaml
+# step: namespaces
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: staging
+# step: workloads
+---
+apiVersion: apps/v1
+kind: Deployment
+...
+```
+
+---
+
+## Diff Commands
+
+### `flux-operator diff yaml <source> <target>`
+
+Compares two YAML files and produces an RFC 6902 JSON patch that transforms the source into the target. The comparison ignores `metadata` and `status` fields to focus on the semantic content of the manifests. Both source and target can be local file paths or remote URLs, including GitHub, GitLab, GitHub Gist, and OCI URLs.
+
+**Flags**
+
+| Flag | Description | Default |
+|---|---|---|
+| `-o, --output` | Output format: `json-patch-yaml` or `json-patch` | `json-patch-yaml` |
+
+**Example — compare two local files**
+
+```shell
+flux-operator diff yaml current.yaml desired.yaml
+```
+
+**Example — compare local file against a remote URL**
+
+```shell
+flux-operator diff yaml flux-instance.yaml \
+  https://github.com/my-org/fleet/raw/main/clusters/prod/flux-instance.yaml
+```
+
+**Example — compare two OCI artifacts**
+
+```shell
+flux-operator diff yaml \
+  oci://ghcr.io/my-org/manifests:v1.0.0 \
+  oci://ghcr.io/my-org/manifests:v1.1.0
+```
+
+**Example — output as raw JSON patch**
+
+```shell
+flux-operator diff yaml current.yaml desired.yaml -o json-patch
+```
+
+**Sample `json-patch-yaml` output**
+
+```yaml
+- op: replace
+  path: /spec/distribution/version
+  value: "2.9.x"
+- op: add
+  path: /spec/components/-
+  value: image-reflector-controller
+```
+
+**Sample `json-patch` output**
+
+```json
+[
+  {"op": "replace", "path": "/spec/distribution/version", "value": "2.9.x"},
+  {"op": "add", "path": "/spec/components/-", "value": "image-reflector-controller"}
+]
+```
+
+<Note>
+  The diff command ignores `metadata.resourceVersion`, `metadata.generation`, `metadata.annotations`, and `status` fields. This means two manifests that differ only in server-side metadata will produce an empty patch.
+</Note>
+
+---
+
+## Patch Commands
+
+### `flux-operator patch instance`
+
+Generates kustomize patches for upgrading Flux controllers in a `FluxInstance`. The command modifies the `FluxInstance` YAML manifest file **in-place**, appending patches to `.spec.kustomize.patches`. The process:
+
+1. Fetches CRD schemas from GitHub for both the current and target controller versions.
+2. Computes a JSON patch for each changed CRD.
+3. Generates `Deployment` image patches pointing to the target controller version.
+4. Released Flux versions are mapped to controller minor versions and resolved to the latest stable patch release in that minor.
+5. Previously generated CRD and image patches are automatically replaced on re-runs.
+
+**Flags**
+
+| Flag | Description | Default |
+|---|---|---|
+| `-f, --filename` | Path to the `FluxInstance` YAML manifest **(required)**; use `-` for stdin | — |
+| `-v, --version` | Target Flux version | `main` |
+| `-r, --registry` | Override the container registry for image patches | `.spec.distribution.registry` |
+| `-c, --components` | Comma-separated list of controllers to patch | `.spec.components` |
+
+**Version formats accepted by `--version`**
+
+| Format | Example | Description |
+|---|---|---|
+| `main` | `main` | Latest unreleased build |
+| Branch | `release/v2.8.x` | Latest build on a branch |
+| Minor | `v2.8` or `2.8` | Latest stable patch in the minor |
+| Full | `v2.8.5` | Exact version |
+
+**Example — patch instance to latest stable minor**
+
+```shell
+flux-operator patch instance -f flux-instance.yaml -v 2.8
+```
+
+**Example — patch to a specific version**
+
+```shell
+flux-operator patch instance -f flux-instance.yaml -v v2.8.5
+```
+
+**Example — patch with a private registry override**
+
+```shell
+flux-operator patch instance \
+  -f flux-instance.yaml \
+  -v v2.8.5 \
+  -r registry.my-org.com/flux
+```
+
+**Example — patch only specific controllers**
+
+```shell
+flux-operator patch instance \
+  -f flux-instance.yaml \
+  -v v2.8.5 \
+  -c source-controller,kustomize-controller
+```
+
+**Example — read from stdin and write to file**
+
+```shell
+cat flux-instance.yaml \
+  | flux-operator patch instance -f - -v v2.8.5 \
+  > flux-instance-patched.yaml
+```
+
+**What gets added to the manifest**
+
+After running, the `FluxInstance` will contain entries like:
+
+```yaml
+spec:
+  kustomize:
+    patches:
+      # CRD schema patch for source-controller v1.5.0
+      - patch: |
+          - op: add
+            path: /spec/someNewField
+            value: {}
+        target:
+          group: source.toolkit.fluxcd.io
+          kind: GitRepository
+      # Image patch for source-controller v1.5.0
+      - patch: |
+          - op: replace
+            path: /spec/template/spec/containers/0/image
+            value: ghcr.io/fluxcd/source-controller:v1.5.0
+        target:
+          kind: Deployment
+          name: source-controller
+```
+
+<Tip>
+  Run `flux-operator patch instance` in a CI pipeline to automatically keep your `FluxInstance` manifest in sync with new Flux releases. Commit the resulting diff as a pull request to your GitOps repository.
+</Tip>

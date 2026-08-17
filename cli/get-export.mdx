@@ -1,0 +1,285 @@
+---
+title: "Inspect Flux Resources with Get and Export Commands"
+sidebarTitle: "Get & Export"
+description: "Use flux-operator get, export, stats, trace, and tree commands to inspect Flux resource status, export reports, and visualize the GitOps delivery pipeline."
+---
+
+The `get`, `export`, `stats`, `trace`, and `tree` command groups give you a unified view of every resource managed by the Flux Operator in your cluster. From quick status tables to full YAML exports and dependency-graph tree views, these commands are the primary observability layer of the CLI. All commands in this group require cluster access and a running Flux Operator.
+
+## Get Commands
+
+### `flux-operator get instance`
+
+Retrieves the `FluxInstance` resource and prints its status, including the installed distribution version and any reconciliation errors.
+
+```shell
+flux-operator get instance
+flux-operator get instance -n flux-system
+```
+
+---
+
+### `flux-operator get rset`
+
+Retrieves `ResourceSet` resources and their reconciliation status.
+
+```shell
+flux-operator get rset
+flux-operator get rset -n apps
+flux-operator get rset -A
+```
+
+---
+
+### `flux-operator get rsip`
+
+Retrieves `ResourceSetInputProvider` resources and their current status.
+
+```shell
+flux-operator get rsip
+flux-operator get rsip -n apps
+flux-operator get rsip -A
+```
+
+---
+
+### `flux-operator get all`
+
+Retrieves all Flux resources across all kinds (`GitRepository`, `OCIRepository`, `Bucket`, `HelmRepository`, `HelmChart`, `Kustomization`, `HelmRelease`, etc.) and displays their reconciliation status in a table.
+
+**Flags**
+
+| Flag | Description | Default |
+|---|---|---|
+| `--kind` | Filter by resource kind (e.g. `Kustomization`, `HelmRelease`) | All kinds |
+| `--ready-status` | Filter by ready status: `True`, `False`, `Unknown`, or `Suspended` | All statuses |
+| `-o, --output` | Output format: `table`, `json`, or `yaml` | `table` |
+| `-n, --namespace` | Filter by namespace | Current context namespace |
+| `-A, --all-namespaces` | Retrieve resources from all namespaces | `false` |
+
+**Examples**
+
+```shell
+# List all Flux resources in all namespaces
+flux-operator get all -A
+
+# Filter to only HelmReleases
+flux-operator get all --kind HelmRelease -A
+
+# Show only failing resources
+flux-operator get all --ready-status False -A
+
+# Show suspended resources across all namespaces
+flux-operator get all --ready-status Suspended -A
+
+# Export as JSON for scripting
+flux-operator get all -A -o json
+
+# Export as YAML
+flux-operator get all -A -o yaml
+```
+
+**Shared namespace flags**
+
+The `-n` and `-A` flags are available on all `get` sub-commands:
+
+| Flag | Description |
+|---|---|
+| `-n, --namespace` | Specifies the namespace to filter the resources |
+| `-A, --all-namespaces` | Retrieves resources from all namespaces |
+
+---
+
+## Export Commands
+
+### `flux-operator export report`
+
+Exports the `FluxReport` resource, which contains the Flux distribution status, installed component versions, and cluster-wide reconciliation health summary.
+
+```shell
+flux-operator export report
+flux-operator export report -o json
+flux-operator export report -n flux-system
+```
+
+**Sample output (YAML)**
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: FluxReport
+metadata:
+  name: flux
+  namespace: flux-system
+status:
+  distribution:
+    status: installed
+    version: v2.8.5
+    entitlement: oss
+  componentVersions:
+  - name: source-controller
+    image: ghcr.io/fluxcd/source-controller:v1.5.0
+  - name: kustomize-controller
+    image: ghcr.io/fluxcd/kustomize-controller:v1.5.0
+```
+
+---
+
+### `flux-operator export resource <kind>/<name>`
+
+Exports any Flux resource from the cluster in YAML or JSON format. The exported manifest can be used for backup, migration, or inspection.
+
+**Flags**
+
+| Flag | Description | Default |
+|---|---|---|
+| `-n, --namespace` | Namespace of the resource | Current context namespace |
+| `-o, --output` | Output format: `yaml` or `json` | `yaml` |
+
+**Examples**
+
+```shell
+# Export a GitRepository
+flux-operator export resource GitRepository/flux-system -n flux-system
+
+# Export a HelmRelease as JSON
+flux-operator export resource HelmRelease/podinfo -n apps -o json
+
+# Export a Kustomization
+flux-operator export resource Kustomization/infrastructure -n flux-system
+
+# Export a FluxInstance
+flux-operator export resource FluxInstance/flux -n flux-system
+```
+
+<Tip>
+  Pipe the output of `export resource` into a file to create a backup or seed a new cluster:
+
+  ```shell
+  flux-operator export resource FluxInstance/flux -n flux-system > flux-instance-backup.yaml
+  ```
+</Tip>
+
+---
+
+## Stats Command
+
+### `flux-operator stats`
+
+Displays statistics about all Flux resources in the cluster, including reconciliation status counts and the cumulative storage used for each source type.
+
+```shell
+flux-operator stats
+```
+
+**Sample output**
+
+```
+Source            Count   Size     Ready   Failed   Suspended
+GitRepository     3       245 MB   3       0        0
+OCIRepository     1       89 MB    1       0        0
+HelmRepository    5       1.2 GB   4       1        0
+
+Resource          Count   Ready   Failed   Suspended
+Kustomization     12      11      1        0
+HelmRelease       8       8       0        0
+```
+
+<Note>
+  The storage size reflects cumulative artifact storage on the cluster, not individual artifact sizes. This is useful for capacity planning and identifying repositories that may be consuming excessive storage.
+</Note>
+
+---
+
+## Trace Command
+
+### `flux-operator trace <kind>/<name>`
+
+Traces a Kubernetes object back through the GitOps delivery pipeline to identify which Flux reconciler manages it and from which source it originates. This is the primary debugging tool for answering "where did this object come from?"
+
+**Flags**
+
+| Flag | Description |
+|---|---|
+| `-n, --namespace` | Namespace of the object to trace |
+
+**Examples**
+
+```shell
+# Trace a Deployment
+flux-operator trace Deployment/nginx -n apps
+
+# Trace a ConfigMap
+flux-operator trace ConfigMap/app-config -n apps
+
+# Trace a Service
+flux-operator trace Service/frontend -n production
+```
+
+**Sample output**
+
+```
+Object:      Deployment/nginx
+Namespace:   apps
+Managed by:  Kustomization/apps (flux-system)
+Source:      GitRepository/flux-system (flux-system)
+Revision:    refs/heads/main@sha1:abc1234
+Path:        clusters/prod/apps/
+```
+
+---
+
+## Tree Commands
+
+The `tree` commands provide a hierarchical visualization of all Kubernetes objects managed by a given Flux resource, by recursively traversing `ResourceSet`, `Kustomization`, and `HelmRelease` hierarchies.
+
+### `flux-operator tree rset <name>`
+
+Prints a tree view of all objects managed by a `ResourceSet`.
+
+```shell
+flux-operator tree rset my-apps -n apps
+```
+
+---
+
+### `flux-operator tree ks <name>`
+
+Prints a tree view of all objects managed by a Flux `Kustomization`.
+
+```shell
+flux-operator tree ks infrastructure -n flux-system
+flux-operator tree ks apps -n flux-system
+```
+
+---
+
+### `flux-operator tree hr <name>`
+
+Prints a tree view of all objects managed by a Flux `HelmRelease`.
+
+```shell
+flux-operator tree hr podinfo -n apps
+flux-operator tree hr cert-manager -n cert-manager
+```
+
+**Shared flags for tree commands**
+
+| Flag | Description |
+|---|---|
+| `-n, --namespace` | Namespace of the root resource |
+
+**Sample output**
+
+```
+Kustomization/infrastructure flux-system
+├── Namespace/cert-manager
+├── HelmRepository/jetstack flux-system
+└── HelmRelease/cert-manager cert-manager
+    ├── Deployment/cert-manager cert-manager
+    ├── Deployment/cert-manager-cainjector cert-manager
+    └── Deployment/cert-manager-webhook cert-manager
+```
+
+<Tip>
+  Use `flux-operator tree ks` combined with `flux-operator stats` and `flux-operator trace` to get a complete picture of your GitOps delivery chain — from source repository all the way down to individual Kubernetes objects.
+</Tip>

@@ -1,0 +1,301 @@
+---
+title: "Configure Cluster Sync Sources for Flux"
+sidebarTitle: "Cluster Sync"
+description: "Sync cluster state from Git repositories, OCI registries, or S3-compatible buckets using FluxInstance with HTTPS, SSH, GitHub App, or cloud workload identity auth."
+---
+
+The `FluxInstance` resource can create and manage Flux source objects (`GitRepository`, `OCIRepository`, or `Bucket`) and a corresponding `Kustomization` to continuously reconcile your cluster state against a source repository. The operator creates these objects in the same namespace as the `FluxInstance`, using the namespace name as the resource name — matching the naming convention used by `flux bootstrap` to allow seamless migration from bootstrapped clusters.
+
+The sync source and path are configured under `spec.sync`. Authentication is provided either through a Kubernetes `pullSecret` reference or a cloud provider OIDC identity via the `provider` field.
+
+## Git Repository
+
+<Tabs>
+  <Tab title="HTTPS (PAT)">
+    Sync from a private Git repository over HTTPS using a personal access token or similar basic-auth credential:
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: FluxInstance
+    metadata:
+      name: flux
+      namespace: flux-system
+    spec:
+      distribution:
+        version: "2.8.x"
+        registry: "ghcr.io/fluxcd"
+      sync:
+        kind: GitRepository
+        url: "https://gitlab.com/my-org/my-fleet.git"
+        ref: "refs/heads/main"
+        path: "clusters/my-cluster"
+        pullSecret: "flux-system"
+    ```
+
+    Create the secret with the `flux-operator` CLI:
+
+    ```shell
+    echo $GITLAB_TOKEN | flux-operator create secret basic-auth flux-system \
+      --namespace=flux-system \
+      --username=git \
+      --password-stdin
+    ```
+  </Tab>
+  <Tab title="GitHub App">
+    Authenticate using a GitHub App instead of a PAT for improved security and higher API rate limits (requires Flux v2.5.0 and Flux Operator v0.16.0 or later):
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: FluxInstance
+    metadata:
+      name: flux
+      namespace: flux-system
+    spec:
+      distribution:
+        version: "2.8.x"
+        registry: "ghcr.io/fluxcd"
+      sync:
+        kind: GitRepository
+        provider: github
+        url: "https://github.com/my-org/my-fleet.git"
+        ref: "refs/heads/main"
+        path: "clusters/my-cluster"
+        pullSecret: "flux-system"
+    ```
+
+    Create the GitHub App secret with the `flux-operator` CLI:
+
+    ```shell
+    flux-operator create secret githubapp flux-system \
+      --namespace=flux-system \
+      --app-id=1 \
+      --app-installation-owner=my-org \
+      --app-private-key-file=./path/to/private-key-file.pem
+    ```
+
+    <Tip>
+    For details on creating a GitHub App and configuring the required repository permissions, see the Flux [GitRepository API reference](https://fluxoperator.dev/docs/crd/gitrepository/#github).
+    </Tip>
+  </Tab>
+  <Tab title="Azure Workload Identity">
+    Sync from Azure DevOps without storing credentials by annotating the `source-controller` ServiceAccount with an AKS Workload Identity client ID:
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: FluxInstance
+    metadata:
+      name: flux
+      namespace: flux-system
+    spec:
+      distribution:
+        version: "2.8.x"
+        registry: "ghcr.io/fluxcd"
+      sync:
+        kind: GitRepository
+        provider: azure
+        url: "https://dev.azure.com/my-org/_git/my-fleet"
+        ref: "refs/heads/main"
+        path: "clusters/my-cluster"
+      kustomize:
+        patches:
+        - patch: |-
+            apiVersion: v1
+            kind: ServiceAccount
+            metadata:
+              name: source-controller
+              annotations:
+                azure.workload.identity/client-id: <AZURE_CLIENT_ID>
+                azure.workload.identity/tenant-id: <AZURE_TENANT_ID>
+          target:
+            kind: ServiceAccount
+            name: source-controller
+        - patch: |-
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: source-controller
+            spec:
+              template:
+                metadata:
+                  labels:
+                    azure.workload.identity/use: "true"
+          target:
+            kind: Deployment
+            name: source-controller
+    ```
+  </Tab>
+</Tabs>
+
+## OCI Container Registry
+
+<Tabs>
+  <Tab title="Public Registry">
+    Sync Kubernetes manifests pushed as OCI artifacts to a public container registry:
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: FluxInstance
+    metadata:
+      name: flux
+      namespace: flux-system
+    spec:
+      distribution:
+        version: "2.8.x"
+        registry: "ghcr.io/fluxcd"
+      sync:
+        kind: OCIRepository
+        url: "oci://ghcr.io/my-org/my-fleet-manifests"
+        ref: "latest"
+        path: "clusters/my-cluster"
+    ```
+  </Tab>
+  <Tab title="Private Registry">
+    Reference a `pullSecret` when the registry requires authentication. The secret must be of type `kubernetes.io/dockerconfigjson`:
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: FluxInstance
+    metadata:
+      name: flux
+      namespace: flux-system
+    spec:
+      distribution:
+        version: "2.8.x"
+        registry: "ghcr.io/fluxcd"
+      sync:
+        kind: OCIRepository
+        url: "oci://ghcr.io/my-org/my-fleet-manifests"
+        ref: "latest"
+        path: "clusters/my-cluster"
+        pullSecret: "flux-system"
+    ```
+
+    Create the registry secret with the `flux-operator` CLI:
+
+    ```shell
+    echo $GITHUB_TOKEN | flux-operator create secret registry flux-system \
+      --namespace=flux-system \
+      --server=ghcr.io \
+      --username=flux \
+      --password-stdin
+    ```
+  </Tab>
+  <Tab title="Cloud Workload Identity">
+    Pull OCI artifacts from a managed cloud registry without storing long-lived credentials. Set the `provider` field to the cloud platform:
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: FluxInstance
+    metadata:
+      name: flux
+      namespace: flux-system
+    spec:
+      distribution:
+        version: "2.8.x"
+        registry: "ghcr.io/fluxcd"
+      sync:
+        kind: OCIRepository
+        provider: aws
+        url: "oci://<account>.dkr.ecr.<region>.amazonaws.com/fleet-manifests"
+        ref: "latest"
+        path: "clusters/my-cluster"
+    ```
+
+    Supported `provider` values for OCI registries:
+
+    | Provider | Registry |
+    |---|---|
+    | `aws` | Amazon Elastic Container Registry (ECR) |
+    | `azure` | Azure Container Registry (ACR) |
+    | `gcp` | Google Artifact Registry (GAR) |
+
+    <Note>
+    You must create the corresponding cloud IAM binding (e.g. an EKS Pod Identity association for `source-controller`) that grants the controller permission to pull from the registry.
+    </Note>
+  </Tab>
+  <Tab title="mTLS">
+    Sync from a private registry that requires mutual TLS authentication. Reference the certificate secret via a kustomize patch on the generated `OCIRepository`:
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: FluxInstance
+    metadata:
+      name: flux
+      namespace: flux-system
+    spec:
+      distribution:
+        version: "2.8.x"
+        registry: "ghcr.io/fluxcd"
+      sync:
+        kind: OCIRepository
+        url: "oci://registry.my-org.com/my-fleet-manifests"
+        ref: "latest"
+        path: "clusters/my-cluster"
+      kustomize:
+        patches:
+          - patch: |
+              - op: add
+                path: /spec/certSecretRef
+                value: registry-tls
+            target:
+              kind: OCIRepository
+    ```
+
+    Create the TLS secret with the `flux-operator` CLI:
+
+    ```shell
+    flux-operator -n flux-system create secret tls registry-tls \
+      --tls-crt-file=./tls.crt \
+      --tls-key-file=./tls.key \
+      --ca-crt-file=./ca.crt
+    ```
+
+    <Tip>
+    If the registry uses a self-signed certificate but does not require client authentication, omit `--tls-crt-file` and `--tls-key-file` and provide only `--ca-crt-file`.
+    </Tip>
+  </Tab>
+</Tabs>
+
+## S3-Compatible Bucket
+
+Sync Kubernetes manifests stored as YAML files in an S3-compatible bucket:
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: FluxInstance
+metadata:
+  name: flux
+  namespace: flux-system
+spec:
+  distribution:
+    version: "2.8.x"
+    registry: "ghcr.io/fluxcd"
+  sync:
+    kind: Bucket
+    url: "minio.my-org.com"
+    ref: "my-bucket-fleet"
+    path: "clusters/my-cluster"
+    pullSecret: "bucket-auth"
+```
+
+Create the bucket credential secret directly with `kubectl`:
+
+```shell
+kubectl create secret generic bucket-auth \
+  --namespace flux-system \
+  --from-literal=accesskey=my-accesskey \
+  --from-literal=secretkey=my-secretkey
+```
+
+## Sync Spec Reference
+
+| Field | Required | Description |
+|---|---|---|
+| `kind` | ✅ | Source kind: `GitRepository`, `OCIRepository`, or `Bucket` |
+| `url` | ✅ | Repository URL, OCI address, or bucket endpoint |
+| `ref` | ✅ | Git ref, OCI tag, or bucket name |
+| `path` | ✅ | Path within the source to the kustomize overlay or manifests |
+| `pullSecret` | — | Kubernetes Secret name for authentication credentials |
+| `provider` | — | OIDC provider: `aws`, `azure`, `gcp`, `github`, or `generic` |
+| `interval` | — | Sync interval (default `1m`) |
+| `name` | — | Override the generated source and Kustomization name |

@@ -1,0 +1,475 @@
+---
+title: "ResourceSet API Reference (fluxcd.controlplane.io/v1)"
+sidebarTitle: "ResourceSet"
+description: "Complete API reference for the ResourceSet CRD — generate and reconcile templated Kubernetes resources from a matrix of input values with drift detection and garbage collection."
+---
+
+The **ResourceSet** custom resource is a declarative API for generating a group of Kubernetes objects from a matrix of input values and a set of templated resources. It is the primary building block for multi-tenant deployments, environment promotion pipelines, and any scenario where you need to create many similar resources parameterised by a data source.
+
+The templating engine uses Go text/template syntax with `<< >>` delimiters (instead of `{{ }}`), making ResourceSets embeddable inside Helm charts without escaping conflicts. The operator applies the generated resources to the cluster, performs drift detection, health checking, and garbage collection — removing stale resources whenever inputs change.
+
+## Example
+
+The following ResourceSet creates a `HelmRelease` and `OCIRepository` for each tenant, using `<< inputs.* >>` template syntax:
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSet
+metadata:
+  name: podinfo
+  namespace: default
+  annotations:
+    fluxcd.controlplane.io/reconcile: "enabled"
+    fluxcd.controlplane.io/reconcileEvery: "30m"
+    fluxcd.controlplane.io/reconcileTimeout: "5m"
+spec:
+  commonMetadata:
+    labels:
+      app.kubernetes.io/name: podinfo
+  inputs:
+    - tenant: "team1"
+      app:
+        version: "6.7.x"
+        replicas: 2
+    - tenant: "team2"
+      app:
+        version: "6.6.x"
+        replicas: 3
+  resources:
+    - apiVersion: source.toolkit.fluxcd.io/v1
+      kind: OCIRepository
+      metadata:
+        name: podinfo-<< inputs.tenant >>
+        namespace: default
+      spec:
+        interval: 10m
+        url: oci://ghcr.io/stefanprodan/charts/podinfo
+        ref:
+          semver: << inputs.app.version | quote >>
+    - apiVersion: helm.toolkit.fluxcd.io/v2
+      kind: HelmRelease
+      metadata:
+        name: podinfo-<< inputs.tenant >>
+        namespace: default
+      spec:
+        interval: 1h
+        releaseName: podinfo-<< inputs.tenant >>
+        chartRef:
+          kind: OCIRepository
+          name: podinfo-<< inputs.tenant >>
+        values:
+          replicaCount: << inputs.app.replicas | int >>
+```
+
+## Quick start
+
+```shell
+# Apply the ResourceSet
+kubectl apply -f podinfo.yaml
+
+# Wait for reconciliation
+kubectl wait resourceset/podinfo --for=condition=ready --timeout=5m
+
+# Check status
+kubectl get resourceset
+
+# Describe conditions and events
+kubectl describe resourceset podinfo
+
+# Watch events
+kubectl events --for resourceset/podinfo
+
+# Delete the ResourceSet and all generated resources
+kubectl delete resourceset podinfo
+```
+
+---
+
+## Spec fields
+
+### `spec.inputs`
+
+<ParamField body="inputs" type="ResourceSetInput[]">
+  Optional list of inline key-value input maps. Each map entry becomes an input set that is rendered against every resource template. Keys can be strings or nested objects.
+
+  ```yaml
+  spec:
+    inputs:
+      - tenant: team1
+        role: admin
+      - tenant: team2
+        role: cluster-admin
+  ```
+</ParamField>
+
+---
+
+### `spec.inputsFrom`
+
+<ParamField body="inputsFrom" type="InputProviderReference[]">
+  Optional list of references to `ResourceSetInputProvider` objects that supply dynamic input values. Exactly one of `name` or `selector` must be set per entry.
+
+  <Expandable title="InputProviderReference fields">
+
+  <ParamField body="apiVersion" type="string" default="fluxcd.controlplane.io/v1">
+    API version of the referenced provider. Must be `fluxcd.controlplane.io/v1`.
+  </ParamField>
+
+  <ParamField body="kind" type="string" default="ResourceSetInputProvider">
+    Kind of the referenced provider. Must be `ResourceSetInputProvider`.
+  </ParamField>
+
+  <ParamField body="name" type="string">
+    Name of a single `ResourceSetInputProvider` in the same namespace. Mutually exclusive with `selector`.
+  </ParamField>
+
+  <ParamField body="selector" type="LabelSelector">
+    Kubernetes label selector to match multiple `ResourceSetInputProvider` objects in the same namespace. Supports `matchLabels` and `matchExpressions`. Mutually exclusive with `name`.
+  </ParamField>
+
+  </Expandable>
+
+  ```yaml
+  spec:
+    inputsFrom:
+      - kind: ResourceSetInputProvider
+        name: podinfo-pull-requests
+      # Or select multiple providers by label
+      - kind: ResourceSetInputProvider
+        selector:
+          matchLabels:
+            app: podinfo
+  ```
+</ParamField>
+
+When both `spec.inputs` and `spec.inputsFrom` are set, the resulting input list is the concatenation of both sources.
+
+---
+
+### `spec.inputStrategy`
+
+<ParamField body="inputStrategy.name" type="string" default="Flatten">
+  Controls how inputs from multiple providers are combined. Accepted values:
+
+  - **`Flatten`** (default) — all input sets are concatenated into a flat list.
+  - **`Permute`** — computes the Cartesian product of all input sources. Results are nested under a key derived from each source's normalized name.
+
+  <Warning>
+  The `Permute` strategy can produce a combinatorial explosion. The operator will fail with a `Stalled` condition if the total permutation count exceeds **10 000**. Use `ResourceSetInputProvider` filters to keep per-provider counts small.
+  </Warning>
+</ParamField>
+
+<ParamField body="inputStrategy.includeEmptyProviders" type="boolean" default="false">
+  Only valid when `name` is `Permute`. When `true`, a provider that exports zero inputs produces an empty permutation set (mathematically correct). When `false`, zero-input providers are silently skipped.
+</ParamField>
+
+---
+
+### `spec.resources`
+
+<ParamField body="resources" type="object[]">
+  Optional list of Kubernetes resource objects with embedded Go template expressions using `<< >>` delimiters. At least one of `resources`, `resourcesTemplate`, or `steps` must be set.
+
+  **Templating tips:**
+
+  - Use `<< inputs.field | quote >>` to safely wrap strings.
+  - Use `<< inputs.count | int >>` to emit bare integers.
+  - Use `<< inputs.obj | toYaml | nindent 4 >>` for nested objects.
+  - Use `<< get inputs "field" | default inputs.fallback >>` for optional fields.
+  - Use the `slugify` function to normalize label values: `<< inputs.tenant | slugify >>`.
+  - All [slim-sprig](https://go-task.github.io/slim-sprig/) functions are available.
+
+  Resources with the same `apiVersion/kind/namespace/name` across multiple input sets are **deduplicated** — the first occurrence wins.
+</ParamField>
+
+---
+
+### `spec.resourcesTemplate`
+
+<ParamField body="resourcesTemplate" type="string">
+  Alternative to `spec.resources`. A raw multi-document YAML string containing Go templates. Use `---` to separate documents. Supports advanced constructs like `range`, `if/else`, and nested pipelines.
+
+  When both `resources` and `resourcesTemplate` are set, their generated objects are merged with `resources` taking precedence on conflict.
+
+  ```yaml
+  spec:
+    resourcesTemplate: |
+      ---
+      apiVersion: source.toolkit.fluxcd.io/v1
+      kind: OCIRepository
+      metadata:
+        name: << inputs.bundle >>
+        namespace: flux-system
+      <<- range $component := inputs.components >>
+      ---
+      apiVersion: kustomize.toolkit.fluxcd.io/v1
+      kind: Kustomization
+      metadata:
+        name: << $component >>
+        namespace: flux-system
+      spec:
+        sourceRef:
+          kind: OCIRepository
+          name: << inputs.bundle >>
+        path: ./<< $component >>
+      <<- end >>
+  ```
+</ParamField>
+
+---
+
+### `spec.steps`
+
+Optional ordered list of named reconciliation steps. Use steps when resources must be applied in sequence — for example, running a database migration `Job` before deploying an application. Steps are **mutually exclusive** with `spec.resources` and `spec.resourcesTemplate`.
+
+<Tip>
+A ResourceSet may define at most **20 steps**. Step names must be unique, DNS-label-safe strings (lowercase alphanumeric and hyphens, max 63 characters).
+</Tip>
+
+<ParamField body="steps[].name" type="string" required>
+  Unique step name, used in progress messages and events.
+</ParamField>
+
+<ParamField body="steps[].resources" type="object[]">
+  Resources to reconcile in this step. Same format and templating rules as `spec.resources`.
+</ParamField>
+
+<ParamField body="steps[].resourcesTemplate" type="string">
+  Multi-document YAML template for this step's resources.
+</ParamField>
+
+<ParamField body="steps[].timeout" type="string">
+  Maximum wait time for health checks after applying this step's resources. Defaults to the `fluxcd.controlplane.io/reconcileTimeout` annotation value (default `5m`). Format: Go duration, e.g. `"10m"`.
+</ParamField>
+
+**Step semantics:**
+
+- Each step's resources are health-checked before the next step begins (implied wait).
+- The final step is only health-checked when `spec.wait: true`.
+- If a step fails, subsequent steps are skipped and the full sequence is retried from step 1 on the next reconciliation.
+- Garbage collection is deferred until all steps complete successfully.
+
+```yaml
+spec:
+  steps:
+    - name: db-migration
+      timeout: 5m
+      resources:
+        - apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: db-migration
+            namespace: apps
+            annotations:
+              fluxcd.controlplane.io/force: enabled
+              fluxcd.controlplane.io/recreateOnFailure: enabled
+          spec:
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: migration
+                    image: ghcr.io/org/my-app:<< inputs.version >>
+    - name: app-deploy
+      timeout: 10m
+      resources:
+        - apiVersion: kustomize.toolkit.fluxcd.io/v1
+          kind: Kustomization
+          metadata:
+            name: app-deploy
+            namespace: apps
+          spec:
+            sourceRef:
+              kind: GitRepository
+              name: apps
+            path: ./deploy/my-app
+```
+
+---
+
+### `spec.commonMetadata`
+
+<ParamField body="commonMetadata.labels" type="map[string]string">
+  Labels applied to every generated resource. Overrides any existing label with the same key.
+</ParamField>
+
+<ParamField body="commonMetadata.annotations" type="map[string]string">
+  Annotations applied to every generated resource. A common use is setting `fluxcd.controlplane.io/prune: disabled` on all resources to opt out of garbage collection.
+</ParamField>
+
+---
+
+### `spec.dependsOn`
+
+Optional list of Kubernetes objects that must exist (and optionally be ready) before the ResourceSet reconciles.
+
+<ParamField body="dependsOn[].apiVersion" type="string" required>
+  API version of the dependency.
+</ParamField>
+
+<ParamField body="dependsOn[].kind" type="string" required>
+  Kind of the dependency.
+</ParamField>
+
+<ParamField body="dependsOn[].name" type="string" required>
+  Name of the dependency.
+</ParamField>
+
+<ParamField body="dependsOn[].namespace" type="string">
+  Namespace of the dependency (defaults to same namespace).
+</ParamField>
+
+<ParamField body="dependsOn[].ready" type="boolean" default="false">
+  When `true`, the dependency must have `Ready=True` before this ResourceSet reconciles.
+</ParamField>
+
+<ParamField body="dependsOn[].readyExpr" type="string">
+  A [CEL expression](https://cel.dev) evaluated against the dependency object. Must return a boolean. Replaces the default `Ready` condition check. Syntax or runtime errors cause a `Stalled` condition with reason `InvalidCELExpression`.
+
+  ```yaml
+  spec:
+    dependsOn:
+      - apiVersion: cluster.x-k8s.io/v1beta1
+        kind: Cluster
+        name: my-cluster
+        namespace: dev
+        ready: true
+        readyExpr: |
+          metadata.generation == status.observedGeneration &&
+          status.controlPlaneReady == true
+  ```
+</ParamField>
+
+---
+
+### `spec.serviceAccountName`
+
+<ParamField body="serviceAccountName" type="string">
+  Kubernetes `ServiceAccount` used by the operator when applying resources. Must exist in the same namespace as the ResourceSet. Required for multi-tenant clusters to enforce RBAC isolation.
+
+  Use the `--default-service-account=<name>` operator flag to enforce a service account for all ResourceSets cluster-wide.
+</ParamField>
+
+---
+
+### `spec.wait`
+
+<ParamField body="wait" type="boolean" default="false">
+  When `true`, the operator waits for all generated resources to become ready before marking the ResourceSet as ready. Supports Deployments, StatefulSets, DaemonSets, PVCs, Services, Ingresses, CRDs, all Flux kinds, and any `kstatus`-compatible custom resource.
+
+  Default wait timeout is `5m`, overridable via the `fluxcd.controlplane.io/reconcileTimeout` annotation.
+</ParamField>
+
+---
+
+## Built-in input fields
+
+The operator automatically injects the following fields into every input set — they cannot be overridden:
+
+| Field | Description |
+|---|---|
+| `inputs.id` | Unique stable identifier for the input set (Adler-32 checksum). |
+| `inputs.provider.apiVersion` | API version of the object providing this input set. |
+| `inputs.provider.kind` | Kind of the provider (`ResourceSet` for inline inputs, `ResourceSetInputProvider` for external). |
+| `inputs.provider.name` | Name of the provider object. |
+| `inputs.provider.namespace` | Namespace of the provider object. |
+
+When using the `Permute` strategy, the built-in fields are nested under the normalized provider name, e.g. `inputs.git_tag.id`, `inputs.git_tag.provider.name`.
+
+---
+
+## Resource annotations
+
+These annotations can be placed on individual resources within `spec.resources` or `spec.steps[].resources`:
+
+| Annotation | Value | Effect |
+|---|---|---|
+| `fluxcd.controlplane.io/reconcile` | `disabled` | Excludes the resource from reconciliation (conditional exclusion). |
+| `fluxcd.controlplane.io/force` | `enabled` | Replaces the resource if it has immutable field changes. |
+| `fluxcd.controlplane.io/recreateOnFailure` | `enabled` | Deletes and recreates a failed `Job` (condition `Failed=True`) on next reconcile, even if pruning is disabled. |
+| `fluxcd.controlplane.io/prune` | `disabled` | Prevents the resource from being garbage collected. |
+| `fluxcd.controlplane.io/copyFrom` | `namespace/name` | Copies `data` from an existing `ConfigMap` or `Secret`. |
+| `fluxcd.controlplane.io/checksumFrom` | `Kind/ns/name,...` | Computes a SHA256 checksum over referenced ConfigMaps/Secrets and writes `fluxcd.controlplane.io/checksum` to trigger Pod rollouts. |
+
+---
+
+## Reconciliation annotations
+
+| Annotation | Default | Description |
+|---|---|---|
+| `fluxcd.controlplane.io/reconcile` | `enabled` | Set to `disabled` to pause reconciliation. |
+| `fluxcd.controlplane.io/reconcileEvery` | `1h` | Drift detection interval. |
+| `fluxcd.controlplane.io/reconcileTimeout` | `5m` | Timeout including health checks. |
+| `fluxcd.controlplane.io/force` | — | Set to `enabled` to force-replace resources with immutable field changes on the next reconcile. |
+
+---
+
+## Status
+
+### Conditions
+
+| Type | Status | Reason | Meaning |
+|---|---|---|---|
+| `Ready` | `True` | `ReconciliationSucceeded` | Resources applied and health checks pass. |
+| `Ready` | `False` | `DependencyNotReady` | A `dependsOn` entry is not satisfied. |
+| `Ready` | `False` | `BuildFailed` | Template rendering failed. |
+| `Ready` | `False` | `ReconciliationFailed` | Apply or garbage collection failed. |
+| `Ready` | `False` | `HealthCheckFailed` | One or more generated resources are not healthy. |
+| `Reconciling` | `True` | `Progressing`, `ProgressingWithRetry` | Reconciliation in progress. |
+| `Stalled` | `True` | `BuildFailed`, `InvalidCELExpression` | Terminal misconfiguration — will not retry until fixed. |
+
+### `status.inventory`
+
+Tracks every applied Kubernetes object for drift detection and garbage collection. Format: `<namespace>_<name>_<group>_<kind>` with API version `v`.
+
+```yaml
+status:
+  inventory:
+    entries:
+      - id: apps_podinfo_helm.toolkit.fluxcd.io_HelmRelease
+        v: v2
+      - id: apps_podinfo_source.toolkit.fluxcd.io_OCIRepository
+        v: v1
+```
+
+### `status.history`
+
+Rolling audit log of the last 5 reconciliation snapshots, ordered by last reconcile time.
+
+```yaml
+status:
+  history:
+    - digest: sha256:43ad78c94b2655429d84f21488f29d7cca9cd45b7f54d2b27e16bbec8eff9228
+      firstReconciled: "2025-07-15T10:11:00Z"
+      lastReconciled: "2025-07-15T14:30:00Z"
+      lastReconciledDuration: 2.818583s
+      lastReconciledStatus: ReconciliationSucceeded
+      totalReconciliations: 5
+      metadata:
+        inputs: "2"
+        resources: "4"
+```
+
+### `status.lastAppliedRevision`
+
+SHA256 digest of the generated resource manifests last successfully applied to the cluster.
+
+---
+
+## Prometheus metric
+
+```
+flux_resourceset_info{uid, kind, name, exported_namespace, ready, reason, suspended, resources, revision}
+```
+
+| Label | Example |
+|---|---|
+| `uid` | Kubernetes UID of the ResourceSet |
+| `kind` | `ResourceSet` |
+| `name` | `podinfo` |
+| `exported_namespace` | `apps` |
+| `ready` | `True` |
+| `reason` | `ReconciliationSucceeded` |
+| `suspended` | `False` |
+| `resources` | Number of resources generated |
+| `revision` | `sha256:75aa209c…` |

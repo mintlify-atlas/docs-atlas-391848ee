@@ -1,0 +1,206 @@
+---
+title: "ResourceSet API: Self-Service GitOps Environments"
+sidebarTitle: "Introduction"
+description: "Overview of the Flux Operator ResourceSet API: app definitions, ephemeral environments, monorepo pipelines, and time-based delivery."
+---
+
+The Flux Operator **ResourceSet** API provides a high-level abstraction for defining and managing Flux resources and related Kubernetes objects as a single unit. It is designed to reduce the complexity of GitOps workflows and to enable self-service for developers and platform teams — letting them define applications once, then stamp out multiple instances, on-demand environments, or full monorepo pipelines without duplicating configuration.
+
+## Use Cases
+
+<CardGroup cols={2}>
+  <Card title="App Definitions" icon="cubes" href="/resourcesets/app-definition">
+    Bundle HelmReleases, Kustomizations, namespaces, and RBAC into a single parameterised unit. Deploy multi-instance or multi-cluster applications with a single file.
+  </Card>
+  <Card title="Feature Branches" icon="code-branch" href="/resourcesets/feature-branches">
+    Automatically provision and tear down preview environments for every feature branch on GitHub, GitLab, Azure DevOps, or Gitea.
+  </Card>
+  <Card title="Pull Requests" icon="code-pull-request" href="/resourcesets/pull-requests">
+    Create ephemeral environments tied to the lifecycle of GitHub Pull Requests and GitLab Merge Requests, with built-in commit status reporting.
+  </Card>
+  <Card title="Image Automation" icon="circle-arrow-up" href="/resourcesets/image-automation">
+    Replace the Flux Image Automation controllers with an OCI tag scanning approach that triggers Helm upgrades without any Git commits.
+  </Card>
+  <Card title="Monorepo" icon="folder-tree" href="/resourcesets/monorepo">
+    Auto-generate Kustomization pipelines for every app directory found in a monorepo. Adding a directory deploys the app; removing it tears it down.
+  </Card>
+  <Card title="Staged Jobs" icon="list-check" href="/resourcesets/staged-jobs">
+    Run database migrations, smoke tests, and cache warm-ups in sequence with your app deployments using the ResourceSet steps API.
+  </Card>
+  <Card title="Deployment Windows" icon="clock" href="/resourcesets/time-based-delivery">
+    Gate production rollouts to pre-approved time windows using cron-based schedules on the ResourceSetInputProvider.
+  </Card>
+</CardGroup>
+
+## Core Concepts
+
+### ResourceSet
+
+A `ResourceSet` bundles one or more Kubernetes resources into a template that is rendered once per input set. The spec supports three authoring styles:
+
+- **`spec.resources`** — inline structured YAML objects with `<< inputs.field >>` template expressions.
+- **`spec.resourcesTemplate`** — a multi-document Go template string for conditional logic and loops.
+- **`spec.steps`** — an ordered list of named steps, each with its own resources and health-check timeout (mutually exclusive with `resources` / `resourcesTemplate`).
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSet
+metadata:
+  name: app1
+  namespace: apps
+spec:
+  inputs:
+    - tenant: "tenant1"
+      app:
+        version: "6.7.x"
+        replicas: 2
+    - tenant: "tenant2"
+      app:
+        version: "6.6.x"
+        replicas: 3
+  resources:
+    - apiVersion: source.toolkit.fluxcd.io/v1
+      kind: OCIRepository
+      metadata:
+        name: app1-<< inputs.tenant >>
+        namespace: apps
+      spec:
+        interval: 10m
+        url: oci://my.registry/org/charts/app1
+        ref:
+          semver: << inputs.app.version | quote >>
+    - apiVersion: helm.toolkit.fluxcd.io/v2
+      kind: HelmRelease
+      metadata:
+        name: app1-<< inputs.tenant >>
+        namespace: apps
+      spec:
+        interval: 1h
+        releaseName: app1-<< inputs.tenant >>
+        chartRef:
+          kind: OCIRepository
+          name: app1-<< inputs.tenant >>
+        values:
+          replicaCount: << inputs.app.replicas | int >>
+```
+
+For conditional templating or loops, use `resourcesTemplate`:
+
+```yaml
+spec:
+  resourcesTemplate: |
+    ---
+    apiVersion: kustomize.toolkit.fluxcd.io/v1
+    kind: Kustomization
+    metadata:
+      name: app1-<< inputs.service >>
+      namespace: apps
+    spec:
+      << if inputs.dependsOn >>
+      dependsOn:
+        - name: app1-<< inputs.dependsOn >>
+      << end >>
+      path: "./deploy/<< inputs.service >>"
+      interval: 30m
+      prune: true
+      sourceRef:
+        kind: GitRepository
+        name: app1
+```
+
+### ResourceSetInputProvider
+
+A `ResourceSetInputProvider` feeds dynamic inputs into a `ResourceSet`. It polls an external source — a Git provider, an OCI registry, or an in-cluster API — and exports a list of input sets that the `ResourceSet` controller consumes.
+
+Supported `spec.type` values include:
+
+| Category | Types |
+|---|---|
+| Static | `Static` |
+| GitHub | `GitHubBranch`, `GitHubTag`, `GitHubPullRequest` |
+| GitLab | `GitLabBranch`, `GitLabTag`, `GitLabMergeRequest`, `GitLabEnvironment` |
+| Azure DevOps | `AzureDevOpsBranch`, `AzureDevOpsTag`, `AzureDevOpsPullRequest` |
+| AWS CodeCommit | `AWSCodeCommitBranch`, `AWSCodeCommitTag`, `AWSCodeCommitPullRequest` |
+| Gitea / Forgejo | `GiteaBranch`, `GiteaTag`, `GiteaPullRequest` |
+| OCI Registries | `OCIArtifactTag`, `ACRArtifactTag`, `ECRArtifactTag`, `GARArtifactTag` |
+| In-Cluster | `ExternalArtifact`, `ExternalService` |
+
+### Input Strategies
+
+When a `ResourceSet` references multiple `ResourceSetInputProvider` objects via `spec.inputsFrom`, the `spec.inputStrategy.name` field controls how their exported inputs are combined:
+
+<Tabs>
+  <Tab title="Flatten (default)">
+    All input sets from every provider are concatenated into a single flat list. One resource group is rendered per input set.
+
+    ```yaml
+    spec:
+      inputsFrom:
+        - kind: ResourceSetInputProvider
+          name: provider-a
+        - kind: ResourceSetInputProvider
+          name: provider-b
+      # inputStrategy defaults to Flatten
+    ```
+
+    Use Flatten when each provider represents independent items (e.g., separate tenants or branches) and you want one deployment per item.
+  </Tab>
+  <Tab title="Permute">
+    A Cartesian product is computed across all providers. If provider A exports `[{x: 1}, {x: 2}]` and provider B exports `[{y: "a"}, {y: "b"}]`, the result is four input sets: every combination of A and B.
+
+    ```yaml
+    spec:
+      inputStrategy:
+        name: Permute
+      inputsFrom:
+        - kind: ResourceSetInputProvider
+          name: provider-a
+        - kind: ResourceSetInputProvider
+          name: provider-b
+    ```
+
+    Use Permute for cross-product scenarios such as deploying every chart version against every image tag. Combine with `spec.filter.limit` on providers to keep the number of combinations manageable.
+  </Tab>
+</Tabs>
+
+<Note>
+  When `inputStrategy` is `Permute`, a provider that exports zero inputs will silently be skipped and the remaining providers still permute among themselves. Set `spec.inputStrategy.includeEmptyProviders: true` to instead produce an empty result when any provider has no inputs — the mathematically correct Cartesian product behaviour.
+</Note>
+
+### dependsOn
+
+The `ResourceSet` can wait for other Kubernetes resources to exist and be ready before reconciliation begins:
+
+```yaml
+spec:
+  dependsOn:
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: postgres
+      namespace: db
+      ready: true
+      readyExpr: "status.availableReplicas > 0"
+```
+
+The optional `readyExpr` field accepts a CEL expression evaluated against the dependent resource's status. This is more flexible than Flux's built-in `dependsOn`, which only supports other Flux objects.
+
+## CLI Commands
+
+The `flux-operator` CLI provides tools to build and manage ResourceSets locally and in the cluster:
+
+```shell
+# Build a ResourceSet locally and print the generated objects
+flux-operator build rset -f my-resourceset.yaml
+
+# List all ResourceSets across all namespaces
+flux-operator get rset --all-namespaces
+
+# Reconcile a specific ResourceSet
+flux-operator -n apps reconcile rset podinfo
+
+# Suspend a ResourceSet
+flux-operator -n apps suspend rset podinfo
+
+# Resume a suspended ResourceSet
+flux-operator -n apps resume rset podinfo
+```

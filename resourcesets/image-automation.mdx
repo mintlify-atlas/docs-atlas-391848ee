@@ -1,0 +1,232 @@
+---
+title: "Automate Image Updates with OCI Tag Providers"
+sidebarTitle: "Image Automation"
+description: "Use OCIArtifactTag ResourceSetInputProviders and the Permute strategy to automate Helm upgrades when new container image tags are published."
+---
+
+The Flux Operator provides an alternative to the Flux Image Automation controllers through the `OCIArtifactTag` input provider type. This approach is well-suited to **Gitless GitOps** workflows: instead of committing image tag bumps back to a Git repository, updates are applied directly to the cluster based on policies defined in the desired state. When a new image tag matching your semver constraint or regex filter is detected, the associated `ResourceSet` reconciles and upgrades the Helm release automatically.
+
+## How It Works
+
+A `ResourceSetInputProvider` with `spec.type: OCIArtifactTag` polls an OCI registry on a configurable schedule and exports the matching tags (and their digests) as inputs. A `ResourceSet` consumes those inputs and renders an `OCIRepository` and `HelmRelease` that are kept in sync with the latest detected version. No Git commit is required — the operator holds the version state in the `ResourceSetInputProvider` status.
+
+## Configure Registry Scanning
+
+<Steps>
+  <Step title="Scan the Helm chart OCI repository">
+    Create a `ResourceSetInputProvider` that scans for the latest stable chart version using a semver constraint:
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: ResourceSetInputProvider
+    metadata:
+      name: podinfo-chart
+      namespace: apps
+      annotations:
+        fluxcd.controlplane.io/reconcileEvery: "15m"
+    spec:
+      type: OCIArtifactTag
+      url: oci://ghcr.io/stefanprodan/charts/podinfo
+      filter:
+        semver: ">=6.0.0"
+        limit: 1
+    ```
+  </Step>
+  <Step title="Scan the app container image">
+    Create a provider that tracks new digests of the `latest` tag of the app image:
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: ResourceSetInputProvider
+    metadata:
+      name: podinfo-image
+      namespace: apps
+      annotations:
+        fluxcd.controlplane.io/reconcileEvery: "5m"
+    spec:
+      type: OCIArtifactTag
+      url: oci://ghcr.io/stefanprodan/podinfo
+      filter:
+        includeTag: "latest"
+        limit: 1
+    ```
+  </Step>
+  <Step title="Scan the sidecar image">
+    Create a provider for a second container image, filtering by semver and a tag suffix:
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: ResourceSetInputProvider
+    metadata:
+      name: redis-image
+      namespace: apps
+      annotations:
+        fluxcd.controlplane.io/reconcileEvery: "15m"
+    spec:
+      type: OCIArtifactTag
+      url: oci://docker.io/redis
+      filter:
+        semver: ">0.0.0-0"
+        includeTag: ".*-alpine$"
+        limit: 1
+    ```
+
+    <Note>
+      Provide credentials for private registries by referencing a Secret of type `kubernetes.io/dockerconfigjson` in the `spec.secretRef` field.
+    </Note>
+  </Step>
+</Steps>
+
+## Configure the App Deployment
+
+With three providers in place, create a `ResourceSet` that combines their outputs using the `Permute` input strategy. This produces a single input set containing the latest chart tag from `podinfo-chart`, the latest image tag from `podinfo-image`, and the latest redis tag from `redis-image`:
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: ResourceSet
+metadata:
+  name: podinfo
+  namespace: apps
+  annotations:
+    fluxcd.controlplane.io/reconcileTimeout: "5m"
+spec:
+  inputStrategy:
+    name: Permute
+  inputsFrom:
+    - kind: ResourceSetInputProvider
+      name: podinfo-chart
+    - kind: ResourceSetInputProvider
+      name: podinfo-image
+    - kind: ResourceSetInputProvider
+      name: redis-image
+  resources:
+    - apiVersion: source.toolkit.fluxcd.io/v1
+      kind: OCIRepository
+      metadata:
+        name: podinfo
+        namespace: << inputs.podinfo_chart.provider.namespace >>
+      spec:
+        interval: 12h
+        url: oci://ghcr.io/stefanprodan/charts/podinfo
+        ref:
+          tag: << inputs.podinfo_chart.tag >>
+    - apiVersion: helm.toolkit.fluxcd.io/v2
+      kind: HelmRelease
+      metadata:
+        name: podinfo
+        namespace: << inputs.podinfo_chart.provider.namespace >>
+      spec:
+        interval: 30m
+        releaseName: podinfo
+        chartRef:
+          kind: OCIRepository
+          name: podinfo
+        values:
+          image:
+            tag: "<< inputs.podinfo_image.tag >>@<< inputs.podinfo_image.digest >>"
+          redis:
+            enabled: true
+            tag: "<< inputs.redis_image.tag >>@<< inputs.redis_image.digest >>"
+```
+
+### How Permute Works Here
+
+When each of the three providers exports a single item (which is enforced by `filter.limit: 1`), the Cartesian product is exactly one combined input set. The template variables are namespaced by provider name: `inputs.podinfo_chart.tag`, `inputs.podinfo_image.tag`, `inputs.podinfo_image.digest`, `inputs.redis_image.tag`, and `inputs.redis_image.digest`.
+
+Every time any provider detects a change — a new chart version, a new digest for `latest`, or a new semver redis tag — the `ResourceSet` reconciles and the Helm release is upgraded.
+
+<Tip>
+  Using `tag@digest` for container image values pins the image to a specific immutable content, not just a mutable tag pointer. This is recommended for production workloads.
+</Tip>
+
+## Patching Images Not Exposed in Helm Values
+
+Some Helm charts do not expose all their container images through values. Use Kustomize post-renderers to patch those images directly:
+
+```yaml
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+spec:
+  postRenderers:
+    - kustomize:
+        images:
+          - name: ghcr.io/stefanprodan/podinfo
+            newTag: << inputs.podinfo_image.tag | quote >>
+            digest: << inputs.podinfo_image.digest | quote >>
+```
+
+For applications deployed via a Flux `Kustomization`, use the `spec.images` field:
+
+```yaml
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+spec:
+  images:
+    - name: ghcr.io/stefanprodan/podinfo
+      newTag: << inputs.podinfo_image.tag | quote >>
+      digest: << inputs.podinfo_image.digest | quote >>
+```
+
+## Notifications
+
+```yaml
+---
+apiVersion: notification.toolkit.fluxcd.io/v1beta3
+kind: Provider
+metadata:
+  name: slack-bot
+  namespace: apps
+spec:
+  type: slack
+  channel: general
+  address: https://slack.com/api/chat.postMessage
+  secretRef:
+    name: slack-bot-token
+---
+apiVersion: notification.toolkit.fluxcd.io/v1beta3
+kind: Alert
+metadata:
+  name: slack
+  namespace: apps
+spec:
+  providerRef:
+    name: slack-bot
+  eventSources:
+    - kind: OCIRepository
+      name: '*'
+    - kind: HelmRelease
+      name: '*'
+    - kind: Kustomization
+      name: '*'
+    - kind: ResourceSet
+      name: '*'
+  eventMetadata:
+    cluster: "dev-cluster-1"
+    region: "us-east-1"
+```
+
+## CLI Operations
+
+```shell
+# View status of all ResourceSets and their input providers
+flux-operator -n apps get all
+
+# Suspend image scanning for a specific image
+flux-operator -n apps suspend rsip redis-image
+
+# Suspend the entire automation workflow
+flux-operator -n apps suspend rset podinfo
+
+# Resume a specific provider
+flux-operator -n apps resume rsip redis-image
+
+# Resume the ResourceSet
+flux-operator -n apps resume rset podinfo
+
+# Trigger an immediate image scan
+flux-operator -n apps reconcile rsip redis-image
+
+# Build the ResourceSet locally with static test inputs
+flux-operator build rset -f podinfo-resourceset.yaml \
+  --inputs-from-provider static-inputs.yaml
+```

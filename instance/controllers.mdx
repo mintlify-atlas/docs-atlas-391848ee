@@ -1,0 +1,256 @@
+---
+title: "Configure Flux Controllers with FluxInstance"
+sidebarTitle: "Controllers"
+description: "Configure Flux controllers using FluxInstance: set the distribution version, choose components, select cluster type and size, enable multitenancy, and control reconciliation."
+---
+
+The Flux Operator manages the complete lifecycle of Flux controllers through a single custom resource called `FluxInstance`. A single resource of this kind — always named **flux** — lives in the same namespace as the operator and drives installation, configuration, and automated upgrades of the entire Flux distribution.
+
+## Minimal Configuration
+
+The smallest valid `FluxInstance` only needs a distribution version, a registry, and a cluster size:
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: FluxInstance
+metadata:
+  name: flux
+  namespace: flux-system
+spec:
+  distribution:
+    version: "2.8.x"
+    registry: "ghcr.io/fluxcd"
+  cluster:
+    type: kubernetes
+    size: medium
+```
+
+Apply the manifest with `kubectl`:
+
+```shell
+kubectl apply -f flux-instance.yaml
+```
+
+The operator reconciles the resource and installs the latest upstream Flux release within the `2.8` semver range using the four default controllers: `source-controller`, `kustomize-controller`, `helm-controller`, and `notification-controller`.
+
+<Tip>
+After a Flux Operator update, if a newer patch version of Flux is published, the operator automatically upgrades the controllers to the latest patch release within the configured semver range — no changes to the `FluxInstance` resource are required.
+</Tip>
+
+To uninstall the Flux instance:
+
+```shell
+kubectl -n flux-system delete fluxinstance flux
+```
+
+## Enterprise Distribution
+
+To deploy the ControlPlane enterprise distribution of Flux, point the operator at the ControlPlane registry and supply an image pull secret:
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: FluxInstance
+metadata:
+  name: flux
+  namespace: flux-system
+spec:
+  distribution:
+    version: "2.8.x"
+    registry: "ghcr.io/controlplaneio-fluxcd/distroless"
+    imagePullSecret: "flux-enterprise-auth"
+    artifact: "oci://ghcr.io/controlplaneio-fluxcd/flux-operator-manifests"
+```
+
+<Tip>
+The operator checks for updates to the ControlPlane distribution by pulling the OCI artifact from `ghcr.io/controlplaneio-fluxcd` every hour. When a new CVE-patched image is available, it automatically pins the controller images to the latest digest without requiring any manual changes.
+</Tip>
+
+Create the `flux-enterprise-auth` pull secret using the `flux-operator` CLI:
+
+```shell
+echo $ENTERPRISE_TOKEN | flux-operator create secret registry flux-enterprise-auth \
+  --namespace=flux-system \
+  --server=ghcr.io \
+  --username=flux \
+  --password-stdin
+```
+
+## Full Configuration
+
+The example below installs all available Flux components, enables multi-tenancy lockdown, uses persistent storage, and sets node-level scheduling constraints via a kustomize patch:
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: FluxInstance
+metadata:
+  name: flux
+  namespace: flux-system
+  annotations:
+    fluxcd.controlplane.io/reconcileEvery: "1h"
+    fluxcd.controlplane.io/reconcileTimeout: "5m"
+spec:
+  distribution:
+    version: "2.8.x"
+    registry: "ghcr.io/fluxcd"
+    artifact: "oci://ghcr.io/controlplaneio-fluxcd/flux-operator-manifests"
+  components:
+    - source-controller
+    - kustomize-controller
+    - helm-controller
+    - notification-controller
+    - image-reflector-controller
+    - image-automation-controller
+    - source-watcher
+  cluster:
+    type: kubernetes
+    size: large
+    multitenant: true
+    tenantDefaultServiceAccount: flux
+    networkPolicy: true
+    domain: "cluster.local"
+  storage:
+    class: "standard"
+    size: "10Gi"
+  kustomize:
+    patches:
+      - target:
+          kind: Deployment
+        patch: |
+          - op: replace
+            path: /spec/template/spec/nodeSelector
+            value:
+              kubernetes.io/os: linux
+          - op: add
+            path: /spec/template/spec/tolerations
+            value:
+              - key: "CriticalAddonsOnly"
+                operator: "Exists"
+```
+
+## Distribution Fields
+
+The `spec.distribution` block is required and controls which images are pulled:
+
+| Field | Description |
+|---|---|
+| `version` | Semver expression, e.g. `2.x` or `2.8.x` |
+| `registry` | Container registry, e.g. `ghcr.io/fluxcd` |
+| `imagePullSecret` | Name of the Kubernetes secret for pulling images |
+| `artifact` | OCI URL of the distribution manifests artifact |
+| `artifactPullSecret` | Secret for pulling the distribution artifact |
+| `variant` | Distribution variant: `upstream-alpine`, `enterprise-alpine`, `enterprise-distroless`, or `enterprise-distroless-fips` |
+
+## Components
+
+When the `spec.components` list is omitted, the operator installs the four core controllers. To enable image automation, list all seven components explicitly:
+
+```yaml
+spec:
+  components:
+    - source-controller
+    - kustomize-controller
+    - helm-controller
+    - notification-controller
+    - image-reflector-controller
+    - image-automation-controller
+    - source-watcher
+```
+
+## Cluster Types and Sizes
+
+The `spec.cluster` block adjusts the installation for the target platform and workload size.
+
+### Cluster Types
+
+<Tabs>
+  <Tab title="Kubernetes">
+    ```yaml
+    spec:
+      cluster:
+        type: kubernetes
+        size: medium
+    ```
+  </Tab>
+  <Tab title="OpenShift">
+    ```yaml
+    spec:
+      cluster:
+        type: openshift
+        size: medium
+    ```
+  </Tab>
+  <Tab title="AWS EKS">
+    ```yaml
+    spec:
+      cluster:
+        type: aws
+        size: medium
+    ```
+  </Tab>
+  <Tab title="Azure AKS">
+    ```yaml
+    spec:
+      cluster:
+        type: azure
+        size: medium
+    ```
+  </Tab>
+  <Tab title="Google GKE">
+    ```yaml
+    spec:
+      cluster:
+        type: gcp
+        size: medium
+    ```
+  </Tab>
+</Tabs>
+
+### Cluster Sizes
+
+The `size` field sets the vertical scaling profile (CPU/memory limits and concurrency) for the Flux controllers:
+
+| Size | Recommended for |
+|---|---|
+| `small` | Single-node, dev/test clusters with few resources |
+| `medium` | Standard production clusters (default) |
+| `large` | High-throughput clusters with many Flux resources |
+
+## Multitenancy
+
+Enable the multi-tenancy lockdown to prevent tenant Flux resources from accessing cluster-wide permissions:
+
+```yaml
+spec:
+  cluster:
+    type: kubernetes
+    size: large
+    multitenant: true
+    tenantDefaultServiceAccount: flux
+    networkPolicy: true
+```
+
+Setting `multitenant: true` restricts `kustomize-controller` and `helm-controller` to impersonate the specified `tenantDefaultServiceAccount` in each tenant namespace rather than using cluster-admin permissions.
+
+Setting `networkPolicy: true` (the default) creates `NetworkPolicy` resources that restrict ingress and egress for all controllers to the `flux-system` namespace.
+
+## Reconciliation Annotations
+
+Control how frequently the operator checks for updates using metadata annotations:
+
+| Annotation | Default | Description |
+|---|---|---|
+| `fluxcd.controlplane.io/reconcileEvery` | `1h` | Interval between full reconciliation runs |
+| `fluxcd.controlplane.io/reconcileArtifactEvery` | `10m` | Interval between distribution artifact checks |
+| `fluxcd.controlplane.io/reconcileTimeout` | `5m` | Timeout for a single reconciliation attempt |
+
+Example:
+
+```yaml
+metadata:
+  annotations:
+    fluxcd.controlplane.io/reconcileEvery: "6h"
+    fluxcd.controlplane.io/reconcileArtifactEvery: "30m"
+    fluxcd.controlplane.io/reconcileTimeout: "10m"
+```
+
+To disable automatic reconciliation entirely, set the `fluxcd.controlplane.io/reconcile: disabled` annotation on the `FluxInstance`.

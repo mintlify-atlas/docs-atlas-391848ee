@@ -1,0 +1,475 @@
+---
+title: "FluxInstance API Reference (fluxcd.controlplane.io/v1)"
+sidebarTitle: "FluxInstance"
+description: "Complete API reference for the FluxInstance CRD — declarative installation, configuration, and automatic upgrade of the Flux distribution on Kubernetes."
+---
+
+The **FluxInstance** custom resource is the primary API for managing the full lifecycle of a Flux distribution on a Kubernetes cluster. It covers installation, component selection, cluster-specific tuning, persistent storage, horizontal sharding, GitOps sync bootstrapping, and automatic upgrades. A single `FluxInstance` named `flux` may exist per cluster and must be created in the same namespace as the flux-operator (typically `flux-system`).
+
+The flux-operator reconciles the resource on a configurable interval (default `1h`) and continuously drifts-detects the installed Flux manifests against the desired state, applying corrections as needed.
+
+## Example
+
+```yaml
+apiVersion: fluxcd.controlplane.io/v1
+kind: FluxInstance
+metadata:
+  name: flux
+  namespace: flux-system
+  annotations:
+    fluxcd.controlplane.io/reconcile: "enabled"
+    fluxcd.controlplane.io/reconcileEvery: "1h"
+    fluxcd.controlplane.io/reconcileArtifactEvery: "10m"
+    fluxcd.controlplane.io/reconcileTimeout: "5m"
+spec:
+  distribution:
+    version: "2.8.x"
+    registry: "ghcr.io/fluxcd"
+    artifact: "oci://ghcr.io/controlplaneio-fluxcd/flux-operator-manifests"
+  components:
+    - source-controller
+    - kustomize-controller
+    - helm-controller
+    - notification-controller
+    - image-reflector-controller
+    - image-automation-controller
+  cluster:
+    type: kubernetes
+    size: medium
+    multitenant: false
+    networkPolicy: true
+    domain: "cluster.local"
+  storage:
+    class: "standard"
+    size: "10Gi"
+  commonMetadata:
+    labels:
+      app.kubernetes.io/name: flux
+    annotations:
+      toolkit.fluxcd.io/tenant: sre-team
+  kustomize:
+    patches:
+      - target:
+          kind: Deployment
+        patch: |
+          - op: replace
+            path: /spec/template/spec/nodeSelector
+            value:
+              kubernetes.io/os: linux
+  sync:
+    kind: GitRepository
+    url: "https://github.com/my-org/my-fleet.git"
+    ref: "refs/heads/main"
+    path: "clusters/my-cluster"
+    pullSecret: "git-token-auth"
+```
+
+## Quick start
+
+```shell
+# Apply the FluxInstance
+kubectl apply -f fluxinstance.yaml
+
+# Check status
+kubectl -n flux-system get fluxinstance
+
+# Describe conditions and components
+kubectl -n flux-system describe fluxinstance flux
+
+# Stream operator logs
+kubectl -n flux-system logs deployment/flux-operator
+
+# Watch Kubernetes events
+kubectl -n flux-system events --for FluxInstance/flux
+
+# Remove Flux without affecting managed workloads
+kubectl -n flux-system delete FluxInstance/flux
+```
+
+---
+
+## Spec fields
+
+### `spec.distribution`
+
+<Note>
+`spec.distribution` is **required**. It defines which Flux release to install and where to pull container images from.
+</Note>
+
+<ParamField body="version" type="string" required>
+  Semver expression constraining the Flux version to install, e.g. `"2.8.x"` (latest patch) or `"2.8.0"` (exact). The operator resolves the latest matching release at each reconciliation.
+</ParamField>
+
+<ParamField body="registry" type="string" required>
+  Container registry prefix for all Flux component images, e.g. `"ghcr.io/fluxcd"` (upstream) or `"ghcr.io/controlplaneio-fluxcd/distroless"` (ControlPlane enterprise).
+</ParamField>
+
+<ParamField body="variant" type="string">
+  Required when pointing at a third-party mirror to tell the operator which image layout to expect. Accepted values: `upstream-alpine`, `enterprise-alpine`, `enterprise-distroless`, `enterprise-distroless-fips`.
+</ParamField>
+
+<ParamField body="imagePullSecret" type="string">
+  Name of a `kubernetes.io/dockerconfigjson` Secret in the same namespace used to authenticate image pulls. Required for private registries such as the ControlPlane enterprise registry.
+
+  ```yaml
+  spec:
+    distribution:
+      registry: "ghcr.io/controlplaneio-fluxcd/distroless"
+      imagePullSecret: "flux-enterprise-auth"
+  ```
+</ParamField>
+
+<ParamField body="artifact" type="string">
+  OCI URL (`oci://…`) of the manifest bundle containing the Flux distribution. When set, the operator fetches it on the `reconcileArtifactEvery` interval to detect CVE patches and hotfixes. If omitted, the bundle embedded in the operator image is used — the recommended default for air-gapped environments.
+
+  ```yaml
+  spec:
+    distribution:
+      artifact: "oci://ghcr.io/controlplaneio-fluxcd/flux-operator-manifests"
+  ```
+</ParamField>
+
+<ParamField body="artifactPullSecret" type="string">
+  Name of a `kubernetes.io/dockerconfigjson` Secret used to pull the manifest artifact from a private OCI registry.
+</ParamField>
+
+---
+
+### `spec.components`
+
+Optional list of Flux controller names to install. Defaults to the four core controllers when omitted.
+
+```yaml
+spec:
+  components:
+    - source-controller       # default
+    - kustomize-controller    # default
+    - helm-controller         # default
+    - notification-controller # default
+    - image-reflector-controller
+    - image-automation-controller
+    - source-watcher          # requires Flux v2.7.0+
+```
+
+<Note>
+`source-watcher` was added in Flux v2.7.0. Including it on an older cluster will cause a build failure.
+</Note>
+
+---
+
+### `spec.cluster`
+
+Optional cluster-specific tuning.
+
+<ParamField body="type" type="string" default="kubernetes">
+  Cluster distribution. Accepted values: `kubernetes`, `openshift`, `azure`, `aws`, `gcp`. Selecting a non-`kubernetes` value enables provider-specific configuration (e.g. OpenShift SCCs, EKS IRSA annotations).
+</ParamField>
+
+<ParamField body="size" type="string">
+  Vertical scaling profile for `kustomize-controller` and `helm-controller`. Accepted values: `small`, `medium`, `large`.
+
+  | Size       | Concurrency | CPU limit | Memory limit |
+  |------------|-------------|-----------|--------------|
+  | `small`    | 5           | 1000m     | 512Mi        |
+  | `medium`   | 10          | 2000m     | 1Gi          |
+  | `large`    | 20          | 3000m     | 3Gi          |
+
+  Use `large` for clusters with hundreds to ~1 000 apps; combine with sharding for thousands.
+</ParamField>
+
+<ParamField body="multitenant" type="boolean" default="false">
+  Enables Flux [multi-tenancy lockdown](https://fluxcd.io/flux/installation/configuration/multitenancy/). When `true`, Flux controllers use a per-tenant service account for Kubernetes API operations.
+</ParamField>
+
+<ParamField body="networkPolicy" type="boolean" default="true">
+  Restricts ingress to the Flux namespace from other namespaces using `NetworkPolicy` resources.
+</ParamField>
+
+<ParamField body="domain" type="string" default="cluster.local">
+  Cluster-internal DNS domain used when generating service FQDNs.
+</ParamField>
+
+<ParamField body="objectLevelWorkloadIdentity" type="boolean">
+  Enables the object-level workload identity feature gate and associated RBAC, allowing Flux resources to specify their own `spec.serviceAccountName`. Requires Flux v2.6.0+.
+</ParamField>
+
+<ParamField body="multitenantWorkloadIdentity" type="boolean" default="false">
+  Enables workload identity multi-tenancy lockdown. Requires `objectLevelWorkloadIdentity: true` and Flux v2.7.0+. Designed for cloud environments (AWS IRSA, Azure Workload Identity, GCP Workload Identity).
+</ParamField>
+
+<Expandable title="Workload identity service account fields">
+
+<ParamField body="tenantDefaultServiceAccount" type="string" default="default">
+  Default service account for `source-controller`, `notification-controller`, `image-reflector-controller`, and `image-automation-controller` operations. Also used by `kustomize-controller` and `helm-controller` for Kubernetes API operations when `multitenant: true`.
+</ParamField>
+
+<ParamField body="tenantDefaultDecryptionServiceAccount" type="string" default="default">
+  Default service account for `kustomize-controller` SOPS decryption operations.
+</ParamField>
+
+<ParamField body="tenantDefaultKubeConfigServiceAccount" type="string" default="default">
+  Default service account for `kustomize-controller` and `helm-controller` remote cluster access via `spec.kubeConfig.configMapRef`.
+</ParamField>
+
+</Expandable>
+
+---
+
+### `spec.storage`
+
+Optional persistent volume claim for the `source-controller` artifact cache. When set, the operator creates a PVC named `source-controller` and mounts it at `/data`.
+
+<ParamField body="class" type="string" required>
+  Storage class name, e.g. `"standard"` or `"gp3"`.
+</ParamField>
+
+<ParamField body="size" type="string" required>
+  PVC capacity, e.g. `"10Gi"`.
+</ParamField>
+
+```yaml
+spec:
+  storage:
+    class: "standard"
+    size: "10Gi"
+```
+
+---
+
+### `spec.sharding`
+
+Optional horizontal sharding configuration. For each shard entry the operator creates a parallel set of controllers (`source-controller-<shard>`, `kustomize-controller-<shard>`, etc.).
+
+<ParamField body="key" type="string" default="sharding.fluxcd.io/key">
+  Label key used to route Flux resources to a specific shard.
+</ParamField>
+
+<ParamField body="shards" type="string[]" required>
+  List of shard identifiers. Each value becomes both a label value and a controller name suffix.
+
+  ```yaml
+  spec:
+    sharding:
+      shards:
+        - shard1
+        - shard2
+  ```
+</ParamField>
+
+<ParamField body="storage" type="string" default="ephemeral">
+  Storage mode for shard source-controllers. `ephemeral` uses `emptyDir`; `persistent` creates one PVC per shard using `spec.storage`. Setting `persistent` requires `spec.storage` to be defined.
+</ParamField>
+
+<Note>
+Flux resources that reference each other (e.g. an `ImagePolicy` and its `ImageRepository`) must carry the same shard label so they land on the same controller set.
+</Note>
+
+---
+
+### `spec.kustomize`
+
+<ParamField body="patches" type="KustomizePatch[]">
+  List of strategic-merge or JSON patches applied to the generated Flux manifests before they are deployed. Targets can match by `kind`, `name`, `namespace`, or label/annotation selectors.
+
+  ```yaml
+  spec:
+    kustomize:
+      patches:
+        - target:
+            kind: Deployment
+            name: "(kustomize-controller|helm-controller)"
+          patch: |
+            - op: replace
+              path: /spec/template/spec/volumes/0
+              value:
+                name: temp
+                emptyDir:
+                  medium: Memory
+  ```
+</ParamField>
+
+---
+
+### `spec.sync`
+
+Optional GitOps sync configuration. When set, the operator creates a Flux source object (`GitRepository`, `OCIRepository`, or `Bucket`) and a `Kustomization` in the same namespace. The naming convention mirrors `flux bootstrap` for drop-in compatibility.
+
+<ParamField body="kind" type="string" required>
+  Source kind. Accepted values: `GitRepository`, `OCIRepository`, `Bucket`.
+</ParamField>
+
+<ParamField body="url" type="string" required>
+  Source URL. For Git: `https://` or `ssh://` address. For OCI: `oci://` address. For Bucket: the endpoint hostname.
+</ParamField>
+
+<ParamField body="ref" type="string" required>
+  Source reference. For Git: a full ref name such as `refs/heads/main`. For OCI: a tag such as `latest`. For Bucket: the bucket name.
+</ParamField>
+
+<ParamField body="path" type="string" required>
+  Path inside the source pointing to the kustomize overlay or plain manifests directory, e.g. `clusters/my-cluster`.
+</ParamField>
+
+<ParamField body="pullSecret" type="string">
+  Name of a Kubernetes Secret holding credentials for the source. Format depends on the source kind:
+  - **Git HTTP/S** — `username` + `password` (Opaque)
+  - **Git SSH** — `identity` + `known_hosts` (Opaque)
+  - **OCI** — `kubernetes.io/dockerconfigjson`
+  - **Bucket** — `accesskey` + `secretkey` (Opaque)
+</ParamField>
+
+<ParamField body="provider" type="string">
+  OIDC authentication provider. For `OCIRepository`/`Bucket`: `aws`, `azure`, `gcp`. For `GitRepository`: `aws` (Flux ≥2.9), `azure`, or `github`. Set to `generic` or leave empty to disable OIDC.
+</ParamField>
+
+<ParamField body="interval" type="string" default="1m">
+  Sync frequency expressed as a Go duration, e.g. `"5m"`.
+</ParamField>
+
+<ParamField body="name" type="string">
+  Custom name for the generated source and Kustomization objects. Defaults to the namespace name. **Immutable** — cannot be changed after creation.
+</ParamField>
+
+---
+
+### `spec.commonMetadata`
+
+<ParamField body="labels" type="map[string]string">
+  Labels applied to every Kubernetes resource created as part of the Flux instance. Overrides any pre-existing label with the same key.
+</ParamField>
+
+<ParamField body="annotations" type="map[string]string">
+  Annotations applied to every resource. Overrides any pre-existing annotation with the same key.
+</ParamField>
+
+---
+
+### `spec.migrateResources`
+
+<ParamField body="migrateResources" type="boolean" default="true">
+  Instructs the operator to migrate Flux custom resources in etcd to the latest API version after a minor-version upgrade. Disabling this may cause upgrade failures when deprecated API versions are eventually removed.
+</ParamField>
+
+---
+
+## Reconciliation annotations
+
+Reconciliation behaviour is controlled via metadata annotations on the `FluxInstance` object.
+
+| Annotation | Default | Description |
+|---|---|---|
+| `fluxcd.controlplane.io/reconcile` | `enabled` | Set to `disabled` to pause reconciliation. |
+| `fluxcd.controlplane.io/reconcileEvery` | `1h` | Full reconciliation interval. |
+| `fluxcd.controlplane.io/reconcileArtifactEvery` | `10m` | Artifact polling interval (checks for new Flux patch releases). |
+| `fluxcd.controlplane.io/reconcileTimeout` | `5m` | Maximum time allowed per reconciliation attempt. |
+| `reconcile.fluxcd.io/requestedAt` | — | Set to the current timestamp to trigger an immediate reconciliation. |
+| `reconcile.fluxcd.io/forceAt` | — | Set to the current timestamp to trigger a forced reconciliation that migrates all Flux resources to the latest API version. |
+
+```shell
+# Force immediate reconciliation via the CLI
+flux-operator -n flux-system reconcile instance flux --force
+```
+
+---
+
+## Status
+
+### Conditions
+
+The operator uses the following standard conditions:
+
+| Type | Status | Reason | Meaning |
+|---|---|---|---|
+| `Ready` | `True` | `ReconciliationSucceeded` | Flux is installed and all health checks pass. |
+| `Ready` | `False` | `ArtifactFailed`, `BuildFailed`, `HealthCheckFailed`, `ReconciliationFailed` | Reconciliation failed; retried with exponential back-off. |
+| `Ready` | `Unknown` | `Progressing` | Reconciliation is in progress. |
+| `Reconciling` | `True` | `Progressing`, `ProgressingWithRetry` | Active reconciliation loop running. |
+| `Stalled` | `True` | `BuildFailed` | Terminal misconfiguration — operator will not retry until fixed. |
+
+### `status.components`
+
+List of component images currently installed on the cluster. Each entry contains `name`, `repository`, `tag`, and `digest`.
+
+```yaml
+status:
+  components:
+    - name: source-controller
+      repository: ghcr.io/fluxcd/source-controller
+      tag: v1.3.0
+      digest: sha256:161da425b16b64dda4b3cec2ba0f8d7442973aba29bb446db3b340626181a0bc
+    - name: kustomize-controller
+      repository: ghcr.io/fluxcd/kustomize-controller
+      tag: v1.3.0
+      digest: sha256:48a032574dd45c39750ba0f1488e6f1ae36756a38f40976a6b7a588d83acefc1
+```
+
+### `status.inventory`
+
+Every Kubernetes object owned by the FluxInstance is tracked here for drift detection and garbage collection. Records use the format `<namespace>_<name>_<group>_<kind>` with an API version field `v`.
+
+```yaml
+status:
+  inventory:
+    entries:
+      - id: flux-system_source-controller__ServiceAccount
+        v: v1
+      - id: flux-system_source-controller_apps_Deployment
+        v: v1
+```
+
+### `status.history`
+
+Rolling audit log of the last 5 reconciliation snapshots. Entries are deduplicated by digest and status.
+
+```yaml
+status:
+  history:
+    - digest: sha256:43ad78c94b2655429d84f21488f29d7cca9cd45b7f54d2b27e16bbec8eff9228
+      firstReconciled: "2025-07-15T10:11:00Z"
+      lastReconciled: "2025-07-15T11:12:00Z"
+      lastReconciledDuration: 2.818583s
+      lastReconciledStatus: ReconciliationSucceeded
+      totalReconciliations: 2
+      metadata:
+        flux: "v2.6.4"
+```
+
+### `status.lastAppliedRevision` / `status.lastAttemptedRevision`
+
+Both fields hold the Flux distribution version and manifest digest in the format `<version>@sha256:<digest>`, e.g. `v2.3.0@sha256:4cc5bab…`.
+
+---
+
+## Prometheus metric
+
+The operator exports one metric per `FluxInstance`:
+
+```
+flux_instance_info{uid, kind, name, exported_namespace, ready, reason, suspended, registry, revision}
+```
+
+| Label | Example |
+|---|---|
+| `uid` | `16ca7202-9319-445b-99d0-617c25bda182` |
+| `kind` | `FluxInstance` |
+| `name` | `flux` |
+| `exported_namespace` | `flux-system` |
+| `ready` | `True` |
+| `reason` | `ReconciliationSucceeded` |
+| `suspended` | `False` |
+| `registry` | `ghcr.io/fluxcd` |
+| `revision` | `v2.3.0@sha256:75aa209c…` |
+
+```text
+flux_instance_info{
+  exported_namespace="flux-system",
+  kind="FluxInstance",
+  name="flux",
+  ready="True",
+  reason="ReconciliationSucceeded",
+  registry="ghcr.io/fluxcd",
+  revision="v2.3.0@sha256:75aa209c6a2e25b97114ccf092246d02ab4363bc136edefc239d2a88da882b63",
+  suspended="False",
+  uid="16ca7202-9319-445b-99d0-617c25bda182"
+}
+```

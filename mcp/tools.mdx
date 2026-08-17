@@ -1,0 +1,319 @@
+---
+title: "Flux MCP Server Tools Reference"
+sidebarTitle: "Tools Reference"
+description: "Complete reference for all 17 Flux MCP Server tools, grouped by category with parameters, descriptions, and usage notes for each tool."
+---
+
+The Flux MCP Server exposes 17 tools that AI assistants use to interact with Kubernetes clusters managed by Flux Operator. Tools in the **Reporting**, **Multi-Cluster**, and **Documentation** categories are always available. Tools in the **Reconciliation**, **Suspend/Resume**, **Apply/Delete**, and **Install** categories require the server to be running without `--read-only`.
+
+## Reporting Tools
+
+These tools gather information from the cluster without making any changes to system state.
+
+<AccordionGroup>
+  <Accordion title="get_flux_instance">
+    Retrieves detailed information about the Flux installation in the current cluster context.
+
+    **Parameters:** None
+
+    **Returns:** Comprehensive details about the Flux instance including distribution version, component status and health, and cluster sync statistics. This is the recommended starting point for any Flux analysis workflow.
+  </Accordion>
+
+  <Accordion title="get_kubernetes_resources">
+    Retrieves Kubernetes resources from the cluster, including Flux custom resources, their status, and associated events.
+
+    | Parameter | Required | Type | Description |
+    |---|---|---|---|
+    | `apiVersion` | Yes | string | The API version of the resource(s) |
+    | `kind` | Yes | string | The kind of the resource(s) |
+    | `name` | No | string | The name of a specific resource |
+    | `namespace` | No | string | The namespace to query |
+    | `selector` | No | string | Label selector in `key1=value1,key2=value2` format |
+    | `limit` | No | integer | Maximum number of resources to return |
+
+    **Returns:** Resources in YAML format including specifications, status conditions, related events, and metadata with Flux source references.
+
+    <Note>
+      Before calling this tool, use `get_kubernetes_api_versions` to determine the correct `apiVersion` for a given resource kind — never assume the API version.
+    </Note>
+  </Accordion>
+
+  <Accordion title="get_kubernetes_logs">
+    Retrieves logs from Kubernetes pods to support application behavior analysis and issue troubleshooting.
+
+    | Parameter | Required | Type | Description |
+    |---|---|---|---|
+    | `pod_name` | Yes | string | The name of the pod |
+    | `pod_namespace` | Yes | string | The namespace of the pod |
+    | `container_name` | Yes | string | The name of the container |
+    | `limit` | No | integer | Maximum number of log lines to return (default: 100) |
+    | `previous` | No | boolean | Return logs from the previous container instance (default: false) |
+
+    **Returns:** Log lines from the specified container with timestamps and log levels preserved.
+
+    <Tip>
+      To find the correct pod and container names, first use `get_kubernetes_resources` on the relevant Deployment, then list pods using the `matchLabels` from the deployment spec.
+    </Tip>
+  </Accordion>
+
+  <Accordion title="get_kubernetes_metrics">
+    Retrieves CPU and Memory usage for Kubernetes pods. Requires the [metrics-server](https://github.com/kubernetes-sigs/metrics-server) to be installed in the cluster.
+
+    | Parameter | Required | Type | Description |
+    |---|---|---|---|
+    | `pod_namespace` | Yes | string | The namespace of the pods |
+    | `pod_name` | No | string | The name of a specific pod; omit to select all pods |
+    | `pod_selector` | No | string | Label selector in `key1=value1,key2=value2` format |
+    | `limit` | No | integer | Maximum number of metrics entries to return (default: 100) |
+
+    **Returns:** CPU and Memory metrics for each container in the selected pods, in YAML format.
+  </Accordion>
+
+  <Accordion title="get_kubernetes_api_versions">
+    Retrieves all CRDs registered on the cluster and returns the preferred `apiVersion` for each kind.
+
+    **Parameters:** None
+
+    **Returns:** A mapping of Kubernetes resource kinds to their preferred API versions. Call this tool before `get_kubernetes_resources` whenever the `apiVersion` for a resource kind is unknown.
+  </Accordion>
+</AccordionGroup>
+
+## Multi-Cluster Tools
+
+These tools facilitate interaction with multiple Kubernetes clusters and enable cross-cluster comparison workflows.
+
+<AccordionGroup>
+  <Accordion title="get_kubeconfig_contexts">
+    Retrieves the available Kubernetes cluster contexts from the kubeconfig file.
+
+    **Parameters:** None
+
+    **Returns:** A list of available Kubernetes contexts with their associated cluster names. Use this tool before `set_kubeconfig_context` to identify the correct context name.
+
+    <Note>
+      This tool is disabled when the MCP server is deployed in-cluster. In that mode, only the cluster where the server is deployed is accessible.
+    </Note>
+  </Accordion>
+
+  <Accordion title="set_kubeconfig_context">
+    Switches the current session to use a specific Kubernetes cluster context without modifying the kubeconfig file on disk.
+
+    | Parameter | Required | Type | Description |
+    |---|---|---|---|
+    | `name` | Yes | string | The name of the context to switch to |
+
+    **Returns:** A confirmation message indicating the context has been switched. After switching, call `get_flux_instance` to verify the Flux Operator status in the new context.
+  </Accordion>
+</AccordionGroup>
+
+## Reconciliation Tools
+
+These tools trigger reconciliation of Flux resources, causing Flux to immediately synchronize desired state with current cluster state. All reconciliation tools are disabled in `--read-only` mode.
+
+<AccordionGroup>
+  <Accordion title="reconcile_flux_resourceset">
+    Triggers the reconciliation of a Flux ResourceSet.
+
+    | Parameter | Required | Type | Description |
+    |---|---|---|---|
+    | `name` | Yes | string | The name of the ResourceSet |
+    | `namespace` | Yes | string | The namespace of the ResourceSet |
+
+    **Returns:** Confirmation message and instructions for verifying the reconciliation status.
+  </Accordion>
+
+  <Accordion title="reconcile_flux_source">
+    Triggers the reconciliation of a Flux source resource.
+
+    | Parameter | Required | Type | Description |
+    |---|---|---|---|
+    | `kind` | Yes | string | The source kind: `GitRepository`, `OCIRepository`, `HelmRepository`, `HelmChart`, or `Bucket` |
+    | `name` | Yes | string | The name of the source |
+    | `namespace` | Yes | string | The namespace of the source |
+
+    **Returns:** Confirmation message and instructions for verifying the reconciliation status.
+  </Accordion>
+
+  <Accordion title="reconcile_flux_kustomization">
+    Triggers the reconciliation of a Flux Kustomization.
+
+    | Parameter | Required | Type | Description |
+    |---|---|---|---|
+    | `name` | Yes | string | The name of the Kustomization |
+    | `namespace` | Yes | string | The namespace of the Kustomization |
+    | `with_source` | No | boolean | Whether to also reconcile the associated source (default: false) |
+
+    **Returns:** Confirmation message and instructions for verifying the reconciliation status.
+  </Accordion>
+
+  <Accordion title="reconcile_flux_helmrelease">
+    Triggers the reconciliation of a Flux HelmRelease.
+
+    | Parameter | Required | Type | Description |
+    |---|---|---|---|
+    | `name` | Yes | string | The name of the HelmRelease |
+    | `namespace` | Yes | string | The namespace of the HelmRelease |
+    | `with_source` | No | boolean | Whether to also reconcile the chart source (default: false) |
+
+    **Returns:** Confirmation message and instructions for verifying the reconciliation status.
+  </Accordion>
+</AccordionGroup>
+
+## Suspend / Resume Tools
+
+These tools pause and unpause the reconciliation loop for any Flux resource. Suspended resources are not reconciled until explicitly resumed. Both tools are disabled in `--read-only` mode.
+
+<AccordionGroup>
+  <Accordion title="suspend_flux_reconciliation">
+    Suspends the reconciliation of a Flux resource by setting the `suspend: true` field.
+
+    | Parameter | Required | Type | Description |
+    |---|---|---|---|
+    | `apiVersion` | Yes | string | The API version of the resource |
+    | `kind` | Yes | string | The kind of the resource |
+    | `name` | Yes | string | The name of the resource |
+    | `namespace` | Yes | string | The namespace of the resource |
+
+    **Returns:** Confirmation message indicating the resource has been suspended.
+  </Accordion>
+
+  <Accordion title="resume_flux_reconciliation">
+    Resumes the reconciliation of a previously suspended Flux resource by clearing the `suspend` field.
+
+    | Parameter | Required | Type | Description |
+    |---|---|---|---|
+    | `apiVersion` | Yes | string | The API version of the resource |
+    | `kind` | Yes | string | The kind of the resource |
+    | `name` | Yes | string | The name of the resource |
+    | `namespace` | Yes | string | The namespace of the resource |
+
+    **Returns:** Confirmation message indicating the resource has been resumed.
+  </Accordion>
+</AccordionGroup>
+
+## Apply / Delete Tools
+
+These tools create, update, and remove resources from the cluster. Both are disabled in `--read-only` mode.
+
+<AccordionGroup>
+  <Accordion title="apply_kubernetes_manifest">
+    Applies a YAML manifest to the cluster using Kubernetes server-side apply. If the resources already exist and are managed by Flux, the tool will return an error unless `overwrite` is explicitly set to `true`.
+
+    | Parameter | Required | Type | Description |
+    |---|---|---|---|
+    | `yaml_content` | Yes | string | The multi-document YAML content to apply |
+    | `overwrite` | No | boolean | Whether to overwrite resources managed by Flux (default: false) |
+
+    **Returns:** A list of applied resources in `kind/namespace/name [created|updated|unchanged]` format.
+
+    <Warning>
+      Setting `overwrite: true` on Flux-managed resources will cause drift between Git and cluster state. Only use this when explicitly asked, and reconcile the source afterwards to restore sync.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="delete_kubernetes_resource">
+    Deletes a Kubernetes resource from the cluster.
+
+    | Parameter | Required | Type | Description |
+    |---|---|---|---|
+    | `apiVersion` | Yes | string | The API version of the resource |
+    | `kind` | Yes | string | The kind of the resource |
+    | `name` | Yes | string | The name of the resource |
+    | `namespace` | No | string | The namespace of the resource (required for namespaced resources) |
+
+    **Returns:** Confirmation message indicating the resource has been deleted.
+  </Accordion>
+</AccordionGroup>
+
+## Install Tool
+
+This tool bootstraps Flux Operator and Flux instances on target clusters. It is disabled in `--read-only` mode.
+
+<AccordionGroup>
+  <Accordion title="install_flux_instance">
+    Installs Flux Operator and a Flux instance on the cluster from a manifest URL. Supports HTTPS and OCI URLs.
+
+    | Parameter | Required | Type | Description |
+    |---|---|---|---|
+    | `instance_url` | Yes | string | URL pointing to the Flux Instance manifest file |
+    | `timeout` | No | string | Installation timeout duration (default: `5m`) |
+
+    **Returns:** A detailed installation log including all deployed resources with their change status.
+
+    **Supported URL formats:**
+
+    | Format | Example |
+    |---|---|
+    | OCI Artifact | `oci://ghcr.io/org/manifests:latest#clusters/dev/flux-system/flux-instance.yaml` |
+    | GitHub Gist | `https://gist.github.com/user/id#file-flux-instance-yaml` |
+    | GitHub Repo | `https://github.com/org/repo/blob/main/clusters/dev/flux-system/flux-instance.yaml` |
+    | GitLab Repo | `https://gitlab.com/org/proj/-/blob/main/clusters/dev/flux-system/flux-instance.yaml` |
+
+    **Installation steps performed by the tool:**
+
+    <Steps>
+      <Step title="Download instance manifest">
+        Downloads the Flux instance manifest from the provided URL.
+      </Step>
+      <Step title="Download Flux Operator manifests">
+        Downloads the Flux Operator manifests from the distribution artifact.
+      </Step>
+      <Step title="Install Flux Operator">
+        Installs or upgrades the Flux Operator in the `flux-system` namespace.
+      </Step>
+      <Step title="Install Flux instance">
+        Installs or upgrades the Flux instance according to the manifest configuration.
+      </Step>
+      <Step title="Wait for readiness">
+        Waits for the Flux instance to become ready within the specified timeout.
+      </Step>
+      <Step title="Configure automatic updates">
+        Configures automatic updates for the Flux Operator.
+      </Step>
+    </Steps>
+  </Accordion>
+</AccordionGroup>
+
+## Documentation Tool
+
+This tool provides access to Flux documentation and is always available, including in `--read-only` mode.
+
+<AccordionGroup>
+  <Accordion title="search_flux_docs">
+    Searches the Flux documentation for specific information. Returns concise reference documentation by default, optimized for low agent context usage.
+
+    | Parameter | Required | Type | Description |
+    |---|---|---|---|
+    | `query` | Yes | string | The search query |
+    | `limit` | No | integer | Maximum number of results to return (default: 1) |
+    | `format` | No | string | Documentation format: `concise` or `complete` (default: `concise`) |
+
+    **Returns:** Flux documentation matching the search query. The `concise` format returns compact reference docs; the `complete` format returns full upstream API documentation.
+
+    <Tip>
+      Use the default `concise` format for everyday troubleshooting and manifest validation. Request `format: complete` only when you need the full upstream API specification, such as when exploring all available fields for a CRD.
+    </Tip>
+  </Accordion>
+</AccordionGroup>
+
+## Tool Availability Summary
+
+| Tool | Read-Only Safe | In-Cluster Available |
+|---|---|---|
+| `get_flux_instance` | ✅ | ✅ |
+| `get_kubernetes_resources` | ✅ | ✅ |
+| `get_kubernetes_logs` | ✅ | ✅ |
+| `get_kubernetes_metrics` | ✅ | ✅ |
+| `get_kubernetes_api_versions` | ✅ | ✅ |
+| `get_kubeconfig_contexts` | ✅ | ❌ |
+| `set_kubeconfig_context` | ✅ | ❌ |
+| `reconcile_flux_resourceset` | ❌ | ✅ |
+| `reconcile_flux_source` | ❌ | ✅ |
+| `reconcile_flux_kustomization` | ❌ | ✅ |
+| `reconcile_flux_helmrelease` | ❌ | ✅ |
+| `suspend_flux_reconciliation` | ❌ | ✅ |
+| `resume_flux_reconciliation` | ❌ | ✅ |
+| `apply_kubernetes_manifest` | ❌ | ✅ |
+| `delete_kubernetes_resource` | ❌ | ✅ |
+| `install_flux_instance` | ❌ | ✅ |
+| `search_flux_docs` | ✅ | ✅ |

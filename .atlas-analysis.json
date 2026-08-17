@@ -1,28 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "Flux Operator",
+  "projectType": "infrastructure",
+  "projectName": "Flux Operator",
+  "projectDescription": "A Kubernetes CRD controller that automates the lifecycle management of CNCF Flux CD, providing GitOps autopilot with self-service environments, deployment windows, a Web UI, and an AI-powered MCP server.",
   "theme": "aspen",
-  "colors": {
-    "primary": "#3b82f6",
-    "light": "#5cb4fc",
-    "dark": "#040404"
-  },
-  "favicon": "https://media.brand.dev/cdcb0a85-8dcd-45fd-9215-91e43a2dfae8.png",
-  "logo": {
-    "light": "https://media.brand.dev/c8f7a2d9-e56a-48da-8f6f-09e0d75b3e28.svg",
-    "dark": "https://media.brand.dev/c8f7a2d9-e56a-48da-8f6f-09e0d75b3e28.svg"
-  },
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/controlplaneio-fluxcd/flux-operator"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/controlplaneio-fluxcd/flux-operator"
-    }
-  },
+  "primaryColor": "#3b82f6",
+  "lightColor": "#5cb4fc",
+  "darkColor": "#040404",
   "navigation": {
     "tabs": [
       {
@@ -108,5 +91,27 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "Automated Flux CD lifecycle management via FluxInstance CRD",
+    "Self-service environments with ResourceSet and ResourceSetInputProvider APIs",
+    "GitHub/GitLab/Azure DevOps pull request ephemeral environments",
+    "Flux Web UI with real-time GitOps pipeline visualization",
+    "AI-powered MCP Server for natural language cluster operations",
+    "Multi-cluster sharding, horizontal/vertical scaling support",
+    "Time-based deployment windows with cron scheduling",
+    "Prometheus metrics and deep reporting via FluxReport CRD",
+    "Enterprise distribution support with SLSA Level 3 supply chain security",
+    "OCI, S3, and Git-based cluster sync sources"
+  ],
+  "publicApiSurface": [
+    "FluxInstance CRD (fluxcd.controlplane.io/v1)",
+    "FluxReport CRD (fluxcd.controlplane.io/v1)",
+    "ResourceSet CRD (fluxcd.controlplane.io/v1)",
+    "ResourceSetInputProvider CRD (fluxcd.controlplane.io/v1)",
+    "WebConfig CRD (web.fluxcd.controlplane.io/v1)",
+    "flux-operator CLI (install, uninstall, build, diff, patch, get, reconcile, suspend, resume, delete, export, stats, trace, tree, wait, create secret, skills, distro)",
+    "flux-operator-mcp (MCP tools: get_flux_instance, get_kubernetes_resources, get_kubernetes_logs, get_kubernetes_metrics, get_kubernetes_api_versions, get_kubeconfig_contexts, set_kubeconfig_context, reconcile_flux_source, reconcile_flux_kustomization, reconcile_flux_helmrelease, reconcile_flux_resourceset, suspend_flux_reconciliation, resume_flux_reconciliation, apply_kubernetes_manifest, delete_kubernetes_resource, install_flux_instance, search_flux_docs)",
+    "Prometheus metrics: flux_instance_info, flux_resource_info, flux_resourceset_info, flux_resourcesetinputprovider_info"
+  ]
 }

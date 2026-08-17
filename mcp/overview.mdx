@@ -1,0 +1,97 @@
+---
+title: "Flux MCP Server: AI-Powered GitOps Operations"
+sidebarTitle: "Overview"
+description: "Connect AI assistants to Kubernetes clusters running Flux Operator for natural language GitOps analysis, troubleshooting, and automation."
+---
+
+The Flux MCP Server bridges AI assistants and your Kubernetes clusters, enabling natural language interaction with GitOps pipelines managed by Flux Operator. Rather than context-switching between terminal commands, YAML files, and dashboards, you can ask an AI assistant to analyze deployments, trace failures to root causes, compare configurations across clusters, and trigger reconciliations — all through conversation.
+
+## What the Flux MCP Server Does
+
+The server implements the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/), giving AI assistants a structured, permission-controlled interface to your cluster. Once configured, your AI assistant can:
+
+- **Debug GitOps pipelines end-to-end** — from Flux resources down to application logs
+- **Produce intelligent root cause analysis** for failed deployments
+- **Compare Flux configurations and Kubernetes resources** across multiple clusters
+- **Visualize Flux dependency graphs** generated from live cluster state
+- **Trigger Flux operations** using conversational prompts — reconcile, suspend, resume, apply, and delete
+
+## Supported AI Clients
+
+The Flux MCP Server supports any AI assistant that implements the Model Context Protocol over `stdio`, `sse`, or `http` transports.
+
+<CardGroup cols={2}>
+  <Card title="Claude Desktop" icon="message-bot">
+    Use Project Instructions to configure AI rules and connect via stdio transport.
+  </Card>
+  <Card title="Cursor" icon="code">
+    Store rules in `.cursor/rules` in your Git repository; connect via stdio or HTTP.
+  </Card>
+  <Card title="Windsurf" icon="wind">
+    Place AI rules in `.windsurf/rules` in your Git repository for persistent context.
+  </Card>
+  <Card title="GitHub Copilot" icon="github">
+    Add rules to `.github/copilot-instructions.md` and enable Agent mode in VS Code.
+  </Card>
+</CardGroup>
+
+## Available MCP Tools
+
+The server exposes **17 tools** across seven categories. All tools that read cluster state are available in every mode; write tools require read-only mode to be disabled.
+
+| Category | Tools | Purpose |
+|---|---|---|
+| **Reporting** | `get_flux_instance`, `get_kubernetes_resources`, `get_kubernetes_logs`, `get_kubernetes_metrics`, `get_kubernetes_api_versions` | Gather information from the cluster without modifying state |
+| **Multi-Cluster** | `get_kubeconfig_contexts`, `set_kubeconfig_context` | Switch between cluster contexts for cross-cluster comparison |
+| **Reconciliation** | `reconcile_flux_resourceset`, `reconcile_flux_source`, `reconcile_flux_kustomization`, `reconcile_flux_helmrelease` | Trigger Flux sync operations |
+| **Suspend / Resume** | `suspend_flux_reconciliation`, `resume_flux_reconciliation` | Pause and unpause Flux resource reconciliation |
+| **Apply / Delete** | `apply_kubernetes_manifest`, `delete_kubernetes_resource` | Create, update, or remove Kubernetes resources |
+| **Install** | `install_flux_instance` | Bootstrap Flux Operator and Flux instances on clusters |
+| **Documentation** | `search_flux_docs` | Query the Flux API documentation in concise or complete format |
+
+## Quick Start
+
+Install the binary and add the following to your AI assistant's MCP settings:
+
+```shell
+brew install controlplaneio-fluxcd/tap/flux-operator-mcp
+```
+
+```json
+{
+  "mcpServers": {
+    "flux-operator-mcp": {
+      "command": "flux-operator-mcp",
+      "args": ["serve"],
+      "env": {
+        "KUBECONFIG": "/path/to/.kube/config"
+      }
+    }
+  }
+}
+```
+
+Replace `/path/to/.kube/config` with the absolute path to your kubeconfig. To find it, run `echo $HOME/.kube/config`.
+
+After restarting your AI assistant, test the connection with these prompts:
+
+- *"Which cluster contexts are available in my kubeconfig?"*
+- *"What version of Flux is running in my current cluster?"*
+
+<Note>
+  Before running prompts, copy the AI rules from [instructions.md](https://raw.githubusercontent.com/controlplaneio-fluxcd/flux-operator/refs/heads/main/docs/mcp/instructions.md) into your assistant's instruction settings. This ensures the assistant understands Flux custom resources and follows correct tool-calling workflows.
+</Note>
+
+## Next Steps
+
+<CardGroup cols={3}>
+  <Card title="Installation" icon="download" href="/mcp/installation">
+    Install via Homebrew, binary download, source build, or Kubernetes deployment.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/mcp/configuration">
+    Configure transport modes, security options, and in-cluster deployment.
+  </Card>
+  <Card title="Tools Reference" icon="wrench" href="/mcp/tools">
+    Explore all 17 MCP tools with parameters and usage details.
+  </Card>
+</CardGroup>
