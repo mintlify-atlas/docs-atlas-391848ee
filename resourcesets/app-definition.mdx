@@ -1,7 +1,7 @@
 ---
 title: "Define Multi-Instance Applications with ResourceSets"
 sidebarTitle: "App Definitions"
-description: "Use ResourceSets to bundle Flux and Kubernetes resources into parameterised app definitions for multi-instance, multi-cluster, and microservice deployments."
+description: "Use ResourceSets to bundle Flux and Kubernetes resources into parameterised app definitions for multi-instance, multi-cluster, and microservice use cases."
 ---
 
 The Flux Operator ResourceSet API enables platform teams to define their own application standard as a group of Flux and Kubernetes resources that can be templated, parameterized, and deployed as a single unit across environments. Instead of maintaining a growing tree of Kustomize overlays or Helm umbrella charts, a single `ResourceSet` manifest encapsulates the full application lifecycle — from the source reference to the Helm values — and stamps it out for every configured instance automatically.

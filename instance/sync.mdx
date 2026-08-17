@@ -1,7 +1,7 @@
 ---
-title: "Configure Cluster Sync Sources for Flux"
+title: "Configure Cluster Sync Sources with the FluxInstance CRD"
 sidebarTitle: "Cluster Sync"
-description: "Sync cluster state from Git repositories, OCI registries, or S3-compatible buckets using FluxInstance with HTTPS, SSH, GitHub App, or cloud workload identity auth."
+description: "Sync cluster state from Git repositories, OCI registries, or S3 buckets using FluxInstance with HTTPS, SSH, GitHub App, or cloud workload identity auth."
 ---
 
 The `FluxInstance` resource can create and manage Flux source objects (`GitRepository`, `OCIRepository`, or `Bucket`) and a corresponding `Kustomization` to continuously reconcile your cluster state against a source repository. The operator creates these objects in the same namespace as the `FluxInstance`, using the namespace name as the resource name — matching the naming convention used by `flux bootstrap` to allow seamless migration from bootstrapped clusters.
@@ -40,6 +40,38 @@ The sync source and path are configured under `spec.sync`. Authentication is pro
       --username=git \
       --password-stdin
     ```
+  </Tab>
+  <Tab title="SSH">
+    Sync from a private Git repository over SSH using a deploy key:
+
+    ```yaml
+    apiVersion: fluxcd.controlplane.io/v1
+    kind: FluxInstance
+    metadata:
+      name: flux
+      namespace: flux-system
+    spec:
+      distribution:
+        version: "2.8.x"
+        registry: "ghcr.io/fluxcd"
+      sync:
+        kind: GitRepository
+        url: "ssh://git@github.com/my-org/my-fleet.git"
+        ref: "refs/heads/main"
+        path: "clusters/my-cluster"
+        pullSecret: "flux-system"
+    ```
+
+    Create the SSH secret with the `flux-operator` CLI:
+
+    ```shell
+    flux-operator create secret ssh flux-system \
+      --namespace=flux-system \
+      --private-key-file=./my-private.key \
+      --knownhosts-file=./known_hosts
+    ```
+
+    The secret must contain `identity` (private key) and `known_hosts` fields.
   </Tab>
   <Tab title="GitHub App">
     Authenticate using a GitHub App instead of a PAT for improved security and higher API rate limits (requires Flux v2.5.0 and Flux Operator v0.16.0 or later):

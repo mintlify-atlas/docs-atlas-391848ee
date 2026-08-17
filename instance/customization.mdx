@@ -1,14 +1,14 @@
 ---
-title: "Customize Flux Controllers with Kustomize Patches"
+title: "Customize Flux Controller Deployments with Kustomize Patches"
 sidebarTitle: "Customization"
-description: "Apply strategic merge and JSON patches to Flux controller deployments for node affinity, resource limits, HTTP proxy, SOPS decryption, and signature verification."
+description: "Apply strategic merge and JSON patches to Flux controllers for node affinity, resource limits, HTTP proxy, SOPS decryption, and signature verification."
 ---
 
 The `FluxInstance` resource exposes a `spec.kustomize.patches` field that lets you apply strategic merge patches or JSON patches directly to the Flux manifests before they are applied to the cluster. This gives you fine-grained control over every aspect of the Flux controllers — from resource limits and node scheduling to environment variables and secrets — without forking or maintaining separate Kustomize overlays.
 
 ## Patch Targeting
 
-Patches are matched against generated Flux resources using a `target` selector. You can target by `kind`, by name (including regex), or by a combination of both. The `namespace` field must never be set in a patch target because all patches are scoped to the instance namespace automatically.
+Patches are matched against generated Flux resources using a `target` selector. You can target by `kind`, by `name` (including regex), by `labelSelector`, or by any combination of these fields. The `namespace` field must never be set in a patch target because all patches are scoped to the instance namespace automatically.
 
 ```yaml
 spec:

@@ -1,7 +1,7 @@
 ---
 title: "Trigger and Control Flux Reconciliation from the CLI"
 sidebarTitle: "Reconcile"
-description: "Use flux-operator reconcile, suspend, resume, delete, and wait commands to control the lifecycle of Flux Operator resources and Flux objects in your cluster."
+description: "Use flux-operator reconcile, suspend, resume, delete, and wait to control the full lifecycle of Flux Operator resources and Flux objects in your cluster."
 ---
 
 The `reconcile`, `suspend`, `resume`, `delete`, and `wait` command groups give you direct control over the Flux reconciliation lifecycle from the command line. Whether you need to force an immediate sync, temporarily pause reconciliation during a maintenance window, or cleanly remove a resource from the cluster, these commands provide the primitives. All commands in this group require cluster access and a running Flux Operator installation.
@@ -61,17 +61,20 @@ flux-operator reconcile resource GitRepository/flux-system -n flux-system
 
 ### `flux-operator reconcile all`
 
-Triggers reconciliation of all Flux resources in the cluster. Supports filtering by namespace and ready status to target only specific subsets.
+Triggers reconciliation of all Flux resources of a specified kind in the cluster. The `--kind` flag is **required**. Supports optional filtering by namespace and ready status.
 
 ```shell
-# Reconcile all Flux resources
-flux-operator reconcile all -A
+# Reconcile all Kustomizations in all namespaces
+flux-operator reconcile all --kind Kustomization -A
 
-# Reconcile only failed resources
-flux-operator reconcile all --ready-status False -A
+# Reconcile only failed HelmReleases
+flux-operator reconcile all --kind HelmRelease --ready-status False -A
 
-# Reconcile all resources in a specific namespace
-flux-operator reconcile all -n apps
+# Force-reconcile all HelmReleases (resets the Helm release state)
+flux-operator reconcile all --kind HelmRelease --force -A
+
+# Reconcile all OCIRepositories in a specific namespace
+flux-operator reconcile all --kind OCIRepository -n apps
 ```
 
 **Flags for reconcile commands**
@@ -79,8 +82,10 @@ flux-operator reconcile all -n apps
 | Flag | Description |
 |---|---|
 | `-n, --namespace` | Namespace scope of the command |
-| `--wait` | Wait for reconciliation to complete before returning |
-| `--ready-status` | Filter by ready status (`True`, `False`, `Unknown`, `Suspended`) — `reconcile all` only |
+| `--wait` | Wait for reconciliation to complete before returning (default `true` for `instance`, `rset`, `rsip`, and `resource`) |
+| `--kind` | Kind of resources to reconcile (e.g. `Kustomization`, `HelmRelease`) **(required for `reconcile all`)** |
+| `--ready-status` | Filter by ready status (`True`, `False`, `Unknown`) — `reconcile all` only |
+| `--force` | Force the reconciliation; applies only to `HelmRelease` — `reconcile all` only |
 
 ---
 

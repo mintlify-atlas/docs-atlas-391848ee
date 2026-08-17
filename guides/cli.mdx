@@ -191,6 +191,10 @@ flux-operator get instance
 flux-operator get rset -n flux-system
 ```
 
+```shell Get ResourceSetInputProviders
+flux-operator get rsip -n flux-system
+```
+
 ```shell Get all Flux resources
 flux-operator get all --all-namespaces
 ```
@@ -241,6 +245,10 @@ flux-operator reconcile instance flux -n flux-system --wait
 flux-operator reconcile rset my-app -n flux-system
 ```
 
+```shell Reconcile a ResourceSetInputProvider
+flux-operator reconcile rsip my-provider -n flux-system
+```
+
 ```shell Reconcile a Flux resource
 flux-operator reconcile resource Kustomization/apps -n flux-system --wait
 ```
@@ -271,6 +279,14 @@ flux-operator suspend instance flux -n flux-system
 flux-operator resume instance flux -n flux-system --wait
 ```
 
+```shell Suspend a ResourceSetInputProvider
+flux-operator suspend rsip my-provider -n flux-system
+```
+
+```shell Resume a ResourceSetInputProvider
+flux-operator resume rsip my-provider -n flux-system --wait
+```
+
 ```shell Suspend a HelmRelease
 flux-operator suspend resource HelmRelease/podinfo -n default
 ```
@@ -297,6 +313,9 @@ flux-operator delete instance flux -n flux-system
 
 # Delete a ResourceSet, leaving its managed resources in-place
 flux-operator delete rset my-app -n flux-system --with-suspend
+
+# Delete a ResourceSetInputProvider
+flux-operator delete rsip my-provider -n flux-system
 ```
 
 Options:
@@ -388,6 +407,25 @@ Create or update Kubernetes secrets for Flux — without writing credentials to 
       --ca-crt-file=./ca.crt
     ```
   </Tab>
+  <Tab title="Proxy">
+    ```shell
+    flux-operator create secret proxy proxy-auth \
+      --namespace=flux-system \
+      --address=https://proxy.example.com \
+      --username=user \
+      --password-stdin
+    ```
+  </Tab>
+  <Tab title="Web Config">
+    ```shell
+    flux-operator create secret web-config flux-web-config \
+      --namespace=flux-system \
+      --base-url=https://flux.example.com \
+      --issuer-url=https://auth.example.com \
+      --client-id=flux \
+      --client-secret-stdin
+    ```
+  </Tab>
 </Tabs>
 
 All `create secret` commands support:
@@ -438,6 +476,7 @@ Block until a resource reaches a ready state or the timeout is exceeded:
 ```shell
 flux-operator wait instance flux -n flux-system --timeout 5m
 flux-operator wait rset my-app -n flux-system --timeout 2m
+flux-operator wait rsip my-provider -n flux-system --timeout 2m
 ```
 
 Options:
@@ -493,9 +532,13 @@ Options:
 - `--version` — Flux distribution version, e.g. `2.8.5` or `2.8.x` (default `2.x`)
 - `--variant` — `upstream-alpine`, `enterprise-alpine`, `enterprise-distroless`, or `enterprise-distroless-fips`
 - `--include-operator-image` — also mirror the Flux Operator container image (default `true`)
+- `--include-operator-cli-image` — also mirror the Flux Operator CLI container image (default `true`)
 - `--include-operator-chart` — also mirror the Flux Operator Helm chart (default `true`)
+- `--include-instance-chart` — also mirror the Flux Instance Helm chart (default `true`)
+- `--immutable` — treat destination tags as immutable; existing tags are never overwritten (default `false`)
 - `--dry-run` — list source→destination pairs without writing anything
 - `--verify` — verify cosign signatures before mirroring
+- `--pull-token` — GHCR token for the source registry
 - `--pull-token-stdin` — read a GHCR token from stdin for the source registry
 
 ---
@@ -530,4 +573,10 @@ flux-operator skills update
 
 # Check for updates only (exits with code 1 if updates are available)
 flux-operator skills update --dry-run
+
+# Uninstall all skills from a repository
+flux-operator skills uninstall ghcr.io/my-org/my-skills
+
+# Package and publish a local skills directory as an OCI artifact
+flux-operator skills publish ghcr.io/my-org/my-skills --sign
 ```

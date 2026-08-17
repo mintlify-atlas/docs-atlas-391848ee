@@ -1,12 +1,12 @@
 ---
 title: "FluxReport API Reference (fluxcd.controlplane.io/v1)"
 sidebarTitle: "FluxReport"
-description: "Complete API reference for the FluxReport CRD — auto-generated read-only snapshot of your Flux installation health, components, and reconciler statistics."
+description: "Complete API reference for the FluxReport CRD — read-only snapshot of your Flux installation health, components, and reconciler statistics."
 ---
 
 The **FluxReport** custom resource is a read-only, automatically generated snapshot of the observed state of a Flux installation. Its purpose is to aid monitoring, troubleshooting, and auditing by surfacing Flux component health, distribution metadata, reconciler statistics, cluster sync status, and operator information in a single machine-readable object.
 
-A single `FluxReport` named `flux` exists per cluster and is managed entirely by the flux-operator — you should never create or edit it manually. The operator regenerates it at startup, whenever a `FluxInstance` changes, and on a configurable polling interval (default `5m`). You interact with it through `kubectl get`, annotations, and Prometheus scraping.
+A single `FluxReport` named `flux` exists per cluster and is managed entirely by the flux-operator — you should never create or edit it manually. The operator regenerates it at startup, whenever a `FluxInstance` changes, and on a configurable polling interval controlled by the `fluxcd.controlplane.io/reconcileEvery` annotation (system default `5m`, overridable with the `--reporting-interval` operator flag). You interact with it through `kubectl get`, annotations, and Prometheus scraping.
 
 ## Example output
 
@@ -54,6 +54,12 @@ spec:
         failing: 0
         running: 5
         suspended: 1
+    - apiVersion: fluxcd.controlplane.io/v1
+      kind: ResourceSetInputProvider
+      stats:
+        failing: 1
+        running: 5
+        suspended: 1
     - apiVersion: helm.toolkit.fluxcd.io/v2
       kind: HelmRelease
       stats:
@@ -65,6 +71,24 @@ spec:
       stats:
         failing: 0
         running: 5
+        suspended: 0
+    - apiVersion: notification.toolkit.fluxcd.io/v1
+      kind: Receiver
+      stats:
+        failing: 0
+        running: 1
+        suspended: 0
+    - apiVersion: notification.toolkit.fluxcd.io/v1beta3
+      kind: Alert
+      stats:
+        failing: 0
+        running: 1
+        suspended: 0
+    - apiVersion: notification.toolkit.fluxcd.io/v1beta3
+      kind: Provider
+      stats:
+        failing: 0
+        running: 1
         suspended: 0
     - apiVersion: source.toolkit.fluxcd.io/v1
       kind: GitRepository
@@ -87,6 +111,19 @@ spec:
         running: 7
         suspended: 3
         totalSize: 40.5 MiB
+    - apiVersion: source.toolkit.fluxcd.io/v1beta2
+      kind: Bucket
+      stats:
+        failing: 0
+        running: 0
+        suspended: 0
+    - apiVersion: source.toolkit.fluxcd.io/v1beta2
+      kind: OCIRepository
+      stats:
+        failing: 0
+        running: 1
+        suspended: 0
+        totalSize: 78.1 KiB
   sync:
     ready: true
     id: kustomization/flux-system
@@ -339,7 +376,7 @@ The operator refreshes the `FluxReport` automatically under the following condit
 
 The operator exports one metric for **every Flux resource** found in the cluster. Metrics are refreshed at the same time the `FluxReport` is updated.
 
-```
+```text
 flux_resource_info{uid, kind, name, exported_namespace, ready, reason, suspended, ...}
 ```
 

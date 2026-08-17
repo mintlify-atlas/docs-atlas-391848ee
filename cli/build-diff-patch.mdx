@@ -1,7 +1,7 @@
 ---
 title: "Offline Manifest Generation with Build, Diff, and Patch"
 sidebarTitle: "Build & Patch"
-description: "Use the flux-operator build, diff, and patch commands to generate Flux manifests, compare YAML files, and create kustomize upgrade patches — all without cluster access."
+description: "Use flux-operator build, diff, and patch to generate Flux manifests, compare YAML files, and create kustomize upgrade patches without cluster access."
 ---
 
 The `build`, `diff`, and `patch` commands are the only Flux Operator CLI commands that run entirely **offline**. No Kubernetes cluster is needed — they work against local files and remote URLs, making them ideal for CI validation pipelines, local development, and GitOps pre-flight checks. Each command writes to stdout so its output can be piped directly into `kubectl apply`, saved to a file, or diffed in a pull request.

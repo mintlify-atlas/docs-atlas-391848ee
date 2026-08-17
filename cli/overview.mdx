@@ -1,5 +1,5 @@
 ---
-title: "Flux Operator CLI Reference and Installation"
+title: "Flux Operator CLI Reference and Installation Guide"
 sidebarTitle: "Overview"
 description: "Install the Flux Operator CLI and explore every command group for managing Flux instances, resources, secrets, and AI agent skills."
 ---
@@ -115,7 +115,7 @@ The CLI reads cluster credentials from `~/.kube/config`, the same as `kubectl`. 
 | `tree` | Yes | Visualize Flux-managed objects |
 | `migrate` | Yes | Clean up managed fields on resources |
 | `create secret` | Yes | Create Kubernetes secrets for Flux |
-| `distro mirror` | Yes | Mirror Flux distribution to a private registry |
+| `distro mirror` | No | Mirror Flux distribution to a private registry |
 | `skills` | No | Manage AI agent skills as OCI artifacts |
 | `install` | Yes | Bootstrap a cluster with Flux Operator |
 | `uninstall` | Yes | Remove Flux Operator from a cluster |
@@ -180,7 +180,8 @@ Export resources for backup or inspection:
 
 Control reconciliation state:
 
-- **`flux-operator reconcile instance|rset|rsip|resource|all`** — Trigger an immediate reconciliation.
+- **`flux-operator reconcile instance|rset|rsip|resource`** — Trigger an immediate reconciliation.
+- **`flux-operator reconcile all`** — Trigger reconciliation of all resources of a given `--kind` (required), with optional `--ready-status` and `--force` filters.
 - **`flux-operator suspend instance|rset|rsip|resource`** — Pause reconciliation.
 - **`flux-operator resume instance|rset|rsip|resource`** — Resume reconciliation, optionally waiting for readiness.
 
@@ -215,7 +216,7 @@ Clean up managed fields:
 
 Create Flux-compatible secrets:
 
-- **`flux-operator create secret basic-auth|githubapp|proxy|registry|sops|ssh|tls|web-config|webauth`** — Creates typed secrets in the cluster or exports them in YAML.
+- **`flux-operator create secret basic-auth|githubapp|proxy|registry|sops|ssh|tls|web-config|web-auth`** — Creates typed secrets in the cluster or exports them in YAML.
 
 ### Distro Mirror Command
 

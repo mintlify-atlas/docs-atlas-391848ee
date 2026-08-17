@@ -1,7 +1,7 @@
 ---
-title: "Scale Flux with Controller Sharding"
+title: "Scale Flux Reconciliation Using Controller Sharding"
 sidebarTitle: "Sharding"
-description: "Horizontally scale Flux by distributing reconciliation across multiple controller shards, with optional persistent storage per shard and per-tenant isolation strategies."
+description: "Distribute Flux reconciliation across multiple controller shards for horizontal scaling, with persistent storage per shard and per-tenant isolation."
 ---
 
 The Flux Operator supports sharding the reconciliation workload across multiple sets of Flux controllers, enabling horizontal scaling beyond what a single controller replica can handle. Each shard runs a dedicated copy of the relevant controllers and watches only the Flux resources that carry a matching shard label. This makes sharding equally useful for raw throughput as it is for isolating reconciliation between different teams or environments.

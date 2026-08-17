@@ -1,5 +1,5 @@
 ---
-title: "Manage Users and RBAC for the Flux Web UI"
+title: "Manage Users and RBAC Roles for the Flux Web UI Server"
 sidebarTitle: "User Management"
 description: "Configure anonymous access, OAuth2/OIDC authentication, predefined ClusterRoles, namespace filtering, and CEL-based claims mapping for the Flux Web UI."
 ---
@@ -227,7 +227,7 @@ The Flux Operator ships two `ClusterRole` resources:
     ```
   </Tab>
   <Tab title="flux-web-admin">
-    Full access including the ability to trigger actions. The custom verbs (`reconcile`, `suspend`, `resume`, `download`, `restart`) are Flux Operator–specific and scope actions precisely.
+    Full access including the ability to trigger actions. The custom verbs (`reconcile`, `suspend`, `resume`, `download`, `restart`, `delete`) are Flux Operator–specific and scope actions precisely.
 
     ```yaml
     apiVersion: rbac.authorization.k8s.io/v1
@@ -292,7 +292,7 @@ The Flux Operator ships two `ClusterRole` resources:
 </Tabs>
 
 <Tip>
-  The `patch` verb alone is not sufficient to trigger actions in the Web UI. The user must also hold the specific action verb (`reconcile`, `suspend`, `resume`, `download`, or `restart`) for the target resource type. These verbs are defined by the Flux Operator specifically to enable fine-grained action control.
+  The `patch` verb alone is not sufficient to trigger actions in the Web UI. The user must also hold the specific action verb (`reconcile`, `suspend`, `resume`, `download`, `restart`, or `delete`) for the target resource type. These verbs are defined by the Flux Operator specifically to enable fine-grained action control.
 </Tip>
 
 To disable automatic creation of the predefined roles and manage them yourself via GitOps:

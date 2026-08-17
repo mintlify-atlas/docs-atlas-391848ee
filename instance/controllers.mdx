@@ -1,7 +1,7 @@
 ---
-title: "Configure Flux Controllers with FluxInstance"
+title: "Configure Flux Controllers with the FluxInstance Resource"
 sidebarTitle: "Controllers"
-description: "Configure Flux controllers using FluxInstance: set the distribution version, choose components, select cluster type and size, enable multitenancy, and control reconciliation."
+description: "Configure Flux controllers with FluxInstance: choose components, select cluster type and size, enable multitenancy, and control reconciliation intervals."
 ---
 
 The Flux Operator manages the complete lifecycle of Flux controllers through a single custom resource called `FluxInstance`. A single resource of this kind — always named **flux** — lives in the same namespace as the operator and drives installation, configuration, and automated upgrades of the entire Flux distribution.
@@ -239,6 +239,7 @@ Control how frequently the operator checks for updates using metadata annotation
 
 | Annotation | Default | Description |
 |---|---|---|
+| `fluxcd.controlplane.io/reconcile` | `enabled` | Set to `disabled` to stop the operator from reconciling this resource |
 | `fluxcd.controlplane.io/reconcileEvery` | `1h` | Interval between full reconciliation runs |
 | `fluxcd.controlplane.io/reconcileArtifactEvery` | `10m` | Interval between distribution artifact checks |
 | `fluxcd.controlplane.io/reconcileTimeout` | `5m` | Timeout for a single reconciliation attempt |

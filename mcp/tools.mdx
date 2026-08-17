@@ -1,5 +1,5 @@
 ---
-title: "Flux MCP Server Tools Reference"
+title: "Flux MCP Server Tools: Complete Reference for All 17 Tools"
 sidebarTitle: "Tools Reference"
 description: "Complete reference for all 17 Flux MCP Server tools, grouped by category with parameters, descriptions, and usage notes for each tool."
 ---
@@ -103,6 +103,10 @@ These tools facilitate interaction with multiple Kubernetes clusters and enable 
     | `name` | Yes | string | The name of the context to switch to |
 
     **Returns:** A confirmation message indicating the context has been switched. After switching, call `get_flux_instance` to verify the Flux Operator status in the new context.
+
+    <Note>
+      This tool is disabled when the MCP server is deployed in-cluster. In that mode, only the cluster where the server is deployed is accessible.
+    </Note>
   </Accordion>
 </AccordionGroup>
 

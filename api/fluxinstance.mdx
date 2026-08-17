@@ -344,6 +344,14 @@ Optional GitOps sync configuration. When set, the operator creates a Flux source
 
 ---
 
+### `spec.wait`
+
+<ParamField body="wait" type="boolean" default="true">
+  Instructs the operator to perform health checks on all reconciled Flux resources after applying them, waiting for each to become ready before marking the `FluxInstance` as ready. Supports Deployments, StatefulSets, DaemonSets, Services, and all Flux CRD kinds. Defaults to `true`. Disable only if you need to skip health-checking, e.g. in restricted environments where watch permissions are unavailable.
+</ParamField>
+
+---
+
 ### `spec.migrateResources`
 
 <ParamField body="migrateResources" type="boolean" default="true">
@@ -444,7 +452,7 @@ Both fields hold the Flux distribution version and manifest digest in the format
 
 The operator exports one metric per `FluxInstance`:
 
-```
+```text
 flux_instance_info{uid, kind, name, exported_namespace, ready, reason, suspended, registry, revision}
 ```
 

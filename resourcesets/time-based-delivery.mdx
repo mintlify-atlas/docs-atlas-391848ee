@@ -1,7 +1,7 @@
 ---
-title: "Deliver Safely with Time-Based Deployment Windows"
+title: "Gate Production Rollouts with Time-Based Delivery Windows"
 sidebarTitle: "Deployment Windows"
-description: "Configure cron-based deployment schedules on ResourceSetInputProvider to restrict production rollouts to approved time windows and meet compliance requirements."
+description: "Configure cron-based deployment schedules on ResourceSetInputProvider to restrict production rollouts to approved time windows for compliance."
 ---
 
 In regulated industries, deploying software changes requires strict controls over when changes reach production. Teams must demonstrate compliance with change management policies, ensure sufficient staff coverage during deployments, and avoid impacting peak business operations. The Flux Operator's time-based delivery feature addresses these requirements by letting you attach cron-based schedules to a `ResourceSetInputProvider` — the provider only exports new inputs (and therefore only triggers deployments) during the configured windows.
@@ -252,7 +252,7 @@ flux-operator resume rsip my-app-main --namespace apps
 
 ## Cron Expression Reference
 
-```
+```text
 ┌───────────── minute (0 - 59)
 │ ┌───────────── hour (0 - 23)
 │ │ ┌───────────── day of month (1 - 31)

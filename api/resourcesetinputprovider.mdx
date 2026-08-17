@@ -1,7 +1,7 @@
 ---
-title: "ResourceSetInputProvider API Reference"
+title: "InputProvider API Reference (fluxcd.controlplane.io/v1)"
 sidebarTitle: "InputProvider"
-description: "Complete API reference for the ResourceSetInputProvider CRD — fetch dynamic inputs from GitHub, GitLab, Azure DevOps, OCI registries, and more for use in ResourceSets."
+description: "API reference for the ResourceSetInputProvider CRD — poll GitHub, GitLab, Azure DevOps, and OCI registries to supply dynamic inputs to ResourceSets."
 ---
 
 The **ResourceSetInputProvider** (`rsip`) custom resource is a declarative API for generating a set of input values consumed by [ResourceSet](/api/resourceset) definitions. It polls an external source — a Git hosting service, container registry, HTTP API, or an in-cluster `ExternalArtifact` — and exports a structured list of inputs that the ResourceSet templating engine can reference as `<< inputs.* >>`.
@@ -539,7 +539,7 @@ status:
 
 ## Prometheus metric
 
-```
+```text
 flux_resourcesetinputprovider_info{uid, kind, name, exported_namespace, ready, reason, suspended, url}
 ```
 
